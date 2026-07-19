@@ -41,6 +41,19 @@ yarn-error.*
 
 app-example
 
-# generated native folders
+# Native folders are COMMITTED, not generated on CI.
+#
+# codemagic.yaml builds with `cd android && ./gradlew assembleRelease` and never
+# runs `expo prebuild`, so android/ has to exist in the clone. It also holds
+# hand-maintained sources (CallForegroundService*.kt, the LiveKit init in
+# MainApplication.kt) that a prebuild would overwrite — keeping them tracked is
+# what makes those changes reviewable instead of silently lost.
+#
+# android/.gitignore already excludes build/, .gradle, local.properties and
+# .cxx/, so only ~1MB of real sources is tracked.
+#
+# Consequence: do NOT run `expo prebuild` casually — it rewrites these files.
+# If you must (e.g. an Expo SDK upgrade), run it, then review `git diff` and
+# re-apply anything it clobbered. plugins/withCallKeep.js holds the recipe for
+# the custom native bits.
 /ios
-/android
