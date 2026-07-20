@@ -33,6 +33,7 @@ import {
   assertOkResponse,
   assertSuccessResponse,
   getRequestErrorMessage,
+  getServerMessage,
   readServerStatus,
 } from "@/lib/server-response";
 
@@ -41,6 +42,14 @@ WebBrowser.maybeCompleteAuthSession();
 type Role = "STUDENT" | "TEACHER";
 type RegisterAction = "send-code" | "verify-code" | "create-account" | "google" | null;
 type SignupStep = "email" | "code" | "password";
+
+/**
+ * Account creation runs bcrypt + several DB writes + a welcome email, so on a
+ * cold serverless start it comfortably outruns the api client's default 15s.
+ * A client-side timeout on a request that actually succeeded is what strands
+ * users on this screen, so give the signup calls real headroom.
+ */
+const SLOW_AUTH_TIMEOUT_MS = 45000;
 
 function buildDisplayNameFromEmail(email: string) {
   const localPart = email.split("@")[0] ?? "";
@@ -197,6 +206,54 @@ export default function RegisterScreen() {
     }
   }
 
+  /**
+   * Sign the brand-new account in and drop the user straight into the app.
+   *
+   * By the time this runs the account definitely exists, so a transient failure
+   * must never dead-end the user on the signup screen telling them to go log in
+   * manually. Network errors and 5xx get retried; a 4xx is a definitive answer
+   * from the server and is surfaced as-is.
+   */
+  async function signInAndEnterApp(normalizedEmail: string, accountPassword: string) {
+    const MAX_ATTEMPTS = 3;
+    let lastMessage = "Signing you in failed. Please try again.";
+
+    for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt += 1) {
+      let status: number | null = null;
+
+      try {
+        const res = await api.post(
+          "/mobile/login",
+          { email: normalizedEmail, password: accountPassword },
+          { ...readServerStatus, timeout: SLOW_AUTH_TIMEOUT_MS },
+        );
+
+        status = res.status;
+        assertOkResponse(res, lastMessage);
+
+        const session = await persistMobileAuthSession(dispatch, res.data);
+        router.replace(session.isSuspended ? "/suspended" : "/(tabs)/feed");
+        return;
+      } catch (err: any) {
+        lastMessage = getRequestErrorMessage(err, lastMessage);
+
+        // A definitive 4xx (suspended, deleted, bad password) won't change on a
+        // retry — stop and report it. `status === null` means the request never
+        // completed at all (timeout / offline), which is worth another try.
+        const isRetriable = status === null || status >= 500;
+        if (!isRetriable || attempt === MAX_ATTEMPTS) {
+          const failure = new Error(lastMessage) as Error & {
+            credentialsRejected?: boolean;
+          };
+          failure.credentialsRejected = !isRetriable;
+          throw failure;
+        }
+
+        await new Promise((resolve) => setTimeout(resolve, attempt * 800));
+      }
+    }
+  }
+
   async function completeSignup() {
     const normalizedEmail = email.trim().toLowerCase();
     if (!normalizedEmail) {
@@ -226,29 +283,40 @@ export default function RegisterScreen() {
           email: normalizedEmail,
           password,
           role,
+          // The server re-verifies this OTP before creating the account, so the
+          // /verify-email/confirm step above cannot be skipped.
+          code: verificationCode.trim(),
           referralCode: referralCode.trim() || undefined,
         },
-        readServerStatus,
+        { ...readServerStatus, timeout: SLOW_AUTH_TIMEOUT_MS },
       );
 
-      assertOkResponse(registerRes, "Registration failed. Please try again.");
+      // 409 means the email is already taken. That happens legitimately when a
+      // previous attempt timed out client-side but succeeded on the server, so
+      // try signing in with the password just entered: if it matches, this is
+      // that same half-finished signup and the user belongs in the app. If it
+      // doesn't, sign-in fails and the "already exists" message stands.
+      const isExistingAccount = registerRes.status === 409;
+      if (!isExistingAccount) {
+        assertOkResponse(registerRes, "Registration failed. Please try again.");
+      }
 
-      const res = await api.post(
-        "/mobile/login",
-        {
-          email: normalizedEmail,
-          password,
-        },
-        readServerStatus,
-      );
+      try {
+        await signInAndEnterApp(normalizedEmail, password);
+      } catch (err: any) {
+        // The email was taken by a *different* account, not by a timed-out
+        // attempt of this one — report that rather than "invalid password".
+        if (isExistingAccount && err?.credentialsRejected) {
+          throw new Error(
+            getServerMessage(
+              registerRes.data,
+              "An account already exists with that email address.",
+            ),
+          );
+        }
 
-      assertOkResponse(
-        res,
-        "Account created, but sign-in failed. Please sign in manually.",
-      );
-
-      const session = await persistMobileAuthSession(dispatch, res.data);
-      router.replace(session.isSuspended ? "/suspended" : "/(tabs)/feed");
+        throw err;
+      }
     } catch (err: any) {
       setFormError(getRequestErrorMessage(err, "Registration failed. Please try again."));
     } finally {
@@ -269,7 +337,7 @@ export default function RegisterScreen() {
             role,
             referralCode: referralCode.trim() || undefined,
           },
-          readServerStatus,
+          { ...readServerStatus, timeout: SLOW_AUTH_TIMEOUT_MS },
         );
 
         assertOkResponse(res, "Google sign-up failed. Please try again.");

@@ -68,8 +68,9 @@ import {
   prewarmCallerRoom,
   clearCallerPrewarm,
   setPendingCreate,
-  startOutgoingRingtone,
 } from "@/lib/call-prewarm";
+import { openCall } from "@/lib/call-ui-store";
+import { hasAnyActiveCall } from "@/lib/active-call";
 
 function formatMessageTime(iso: string) {
   const d = new Date(iso);
@@ -744,10 +745,14 @@ export default function WorkspaceScreen() {
         Toast.show({ type: "error", text1: "Microphone permission required" });
         return;
       }
-      await Audio.setAudioModeAsync({
-        allowsRecordingIOS: true,
-        playsInSilentModeIOS: true,
-      });
+      // Skip audio-mode changes while a call is live — they'd knock the
+      // call's voice off the communication stream.
+      if (!hasAnyActiveCall()) {
+        await Audio.setAudioModeAsync({
+          allowsRecordingIOS: true,
+          playsInSilentModeIOS: true,
+        });
+      }
       const recording = new Audio.Recording();
       await recording.prepareToRecordAsync(Audio.RecordingOptionsPresets.HIGH_QUALITY);
       await recording.startAsync();
@@ -775,10 +780,12 @@ export default function WorkspaceScreen() {
     const duration = recordingDuration;
     try {
       await recordingRef.current.stopAndUnloadAsync();
-      await Audio.setAudioModeAsync({
-        allowsRecordingIOS: false,
-        playsInSilentModeIOS: true,
-      });
+      if (!hasAnyActiveCall()) {
+        await Audio.setAudioModeAsync({
+          allowsRecordingIOS: false,
+          playsInSilentModeIOS: true,
+        });
+      }
       const uri = recordingRef.current.getURI();
       recordingRef.current = null;
       setIsRecording(false);
@@ -901,9 +908,8 @@ export default function WorkspaceScreen() {
   const handleStartCall = (mode: "AUDIO" | "VIDEO") => {
     if (!channelId || startingCallType) return;
     setStartingCallType(mode);
-    // Start the ringtone immediately on button press — before navigation —
-    // so the caller hears audio with zero perceived delay.
-    void startOutgoingRingtone();
+    // The outgoing ringback is owned by the call screen and starts once
+    // /calls/create resolves (WhatsApp behavior: silence while "Calling…").
     const createPromise = api
       .post("/calls/create", { channelId, mode })
       .finally(() => setStartingCallType(null));
@@ -912,9 +918,9 @@ export default function WorkspaceScreen() {
     // reporting via the same promise, but we still want this catch so that
     // an unhandled rejection doesn't crash the JS thread.
     createPromise.catch(() => {});
-    router.push(
-      `/call/pending?channelId=${encodeURIComponent(channelId)}&mode=${mode}` as any,
-    );
+    // Open the root-level call overlay (no navigation — the workspace stays
+    // mounted underneath and the call survives any subsequent navigation).
+    openCall({ roomId: "pending", channelId, mode });
   };
 
   // ─── Pre-warm the per-channel LiveKit room ────────────────────

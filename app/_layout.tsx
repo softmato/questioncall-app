@@ -38,13 +38,24 @@ import {
   subscribePushToken,
   addNotificationResponseListener,
   addNotificationReceivedListener,
+  getInitialNotificationResponse,
+  CALL_ACTION_ACCEPT,
+  CALL_ACTION_DECLINE,
 } from "@/lib/push-notifications";
+import type { NotificationResponse } from "expo-notifications";
 
 import { ensureLiveKitRegistered } from "@/lib/livekit-setup";
 import { setupCallKeep } from "@/lib/callkeep-setup";
-import { setupFullScreenCallListeners } from "@/lib/full-screen-call-notification";
+import {
+  setupFullScreenCallListeners,
+  acceptCall,
+  rejectCall,
+} from "@/lib/full-screen-call-notification";
+import { stopOngoingCallService } from "@/lib/ongoing-call-service";
 
 import { GlobalUploadOverlay } from "@/components/sprint2/global-upload-overlay";
+import { PersistentCallHost } from "@/components/calls/persistent-call-host";
+import { CouponInviteHost } from "@/components/subscription/coupon-invite-host";
 
 if (typeof globalThis.Event === "undefined") {
   (globalThis as any).Event = class Event {
@@ -65,6 +76,11 @@ if (typeof globalThis.Event === "undefined") {
 ensureLiveKitRegistered();
 setupCallKeep();
 setupFullScreenCallListeners();
+// Reaching module scope means JS is starting fresh, so no call can be in
+// progress yet. Any ongoing-call service still alive is a leftover from a
+// previous process that died mid-call — its notification is ongoing, so the
+// user cannot swipe it away themselves. Sweep it before the UI comes up.
+stopOngoingCallService();
 
 // Maps web-style hrefs sent in push notification payloads to valid mobile routes.
 // Falls back to the feed tab for anything unrecognised.
@@ -113,6 +129,8 @@ function AppInitializer({ children }: { children: React.ReactNode }) {
     SecureStore.getItemAsync("theme_preference")
       .then((pref) => {
         if (pref === "dark") Appearance.setColorScheme("dark");
+        else if (pref === "system") Appearance.setColorScheme(null);
+        // No stored preference (new user) or explicit "light" → light.
         else Appearance.setColorScheme("light");
       })
       .catch(() => {
@@ -283,8 +301,35 @@ function AppInitializer({ children }: { children: React.ReactNode }) {
         }),
       );
     });
-    const notificationSub = addNotificationResponseListener((response) => {
+    // A cold-start tap can arrive twice — once from getInitialNotificationResponse
+    // below and once from the listener — and handling a call response twice
+    // would fire acceptCall against an already-accepted session.
+    const handledResponseIds = new Set<string>();
+
+    const handleNotificationResponse = (response: NotificationResponse) => {
+      const responseId = response.notification.request.identifier;
+      if (handledResponseIds.has(responseId)) return;
+      handledResponseIds.add(responseId);
+
       const data = response.notification.request.content.data;
+
+      // Accept / Decline tapped on the incoming-call notification. This is the
+      // path a call takes when the app was killed: no JS was alive to draw the
+      // native ringing UI, so Android rendered the plain notification and these
+      // buttons are the only way to answer.
+      const callSessionId =
+        typeof data?.callSessionId === "string" ? data.callSessionId : null;
+      if (callSessionId) {
+        if (response.actionIdentifier === CALL_ACTION_ACCEPT) {
+          void acceptCall(callSessionId);
+          return;
+        }
+        if (response.actionIdentifier === CALL_ACTION_DECLINE) {
+          void rejectCall(callSessionId);
+          return;
+        }
+      }
+
       const raw = data?.url ?? data?.href;
       if (!raw || typeof raw !== "string") return;
       const url = resolveNotificationRoute(raw);
@@ -293,7 +338,18 @@ function AppInitializer({ children }: { children: React.ReactNode }) {
       } else {
         router.push(url as any);
       }
+    };
+
+    const notificationSub = addNotificationResponseListener(handleNotificationResponse);
+
+    // Cold start: the app was launched by tapping a notification. That response
+    // was delivered before this effect ran (it waits on auth rehydration), so
+    // the listener above never sees it and the tap does nothing. Replaying it
+    // here is what lets a killed-app fallback call notification actually answer.
+    void getInitialNotificationResponse().then((response) => {
+      if (response) handleNotificationResponse(response);
     });
+
     return () => {
       clearInterval(heartbeat);
       subscription.remove();
@@ -383,6 +439,14 @@ function RootLayout() {
                     <Stack.Screen name="suspended" options={{ gestureEnabled: false }} />
                   </Stack>
                 </ImageViewerProvider>
+                {/* Active call overlay/bubble — mounted at root so navigation
+                    never unmounts the LiveKit room. Sits above the Stack;
+                    Toast stays above it. */}
+                <PersistentCallHost />
+                {/* Absolute-top "you've been selected" coupon announcement.
+                    Below the call host so an active call always wins the
+                    screen, above the Stack so it rides over any route. */}
+                <CouponInviteHost />
                 <GlobalUploadOverlay />
                 <Toast />
               </AppInitializer>

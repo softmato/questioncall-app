@@ -24,17 +24,24 @@ export type CheckoutIntent = "subscription" | "course" | "chapter";
  * @param onComplete  optional caller refresh (e.g. reload the open course/chapter
  *                    screen) run AFTER global entitlements refresh, so a just-paid
  *                    item flips from locked → unlocked without a manual pull-to-refresh.
+ * @param options.coupon  optional subscription promo code to prefill at the web
+ *                    checkout (re-validated server-side there).
  */
 export async function openWebCheckout(
   intent: CheckoutIntent,
   ref?: string,
   onComplete?: () => void | Promise<void>,
+  options?: { coupon?: string | null },
 ): Promise<void> {
   let url: string;
   try {
     // Ask the backend for an authenticated one-time checkout URL (Bearer auth via
     // the api interceptor). The long-lived token never touches the browser.
-    const { data } = await api.post("/mobile/checkout-session", { intent, ref });
+    const { data } = await api.post("/mobile/checkout-session", {
+      intent,
+      ref,
+      coupon: options?.coupon ?? undefined,
+    });
     url = data?.url;
     if (!url) throw new Error("No checkout url");
 

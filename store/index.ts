@@ -24,7 +24,6 @@ import onboardingReducer from "./slices/onboardingSlice";
 import realtimeReducer from "./slices/realtimeSlice";
 import walletReducer from "./slices/walletSlice";
 import quizReducer from "./slices/quizSlice";
-import incomingCallReducer from "./slices/incomingCallSlice";
 import notesReducer from "./slices/notesSlice";
 import notificationsReducer from "./slices/notificationsSlice";
 import {
@@ -66,7 +65,6 @@ const combinedReducer = combineReducers({
   realtime: realtimeReducer,
   wallet: walletReducer,
   quiz: quizReducer,
-  incomingCall: incomingCallReducer,
   notes: notesReducer,
   notifications: notificationsReducer,
 });

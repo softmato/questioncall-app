@@ -61,11 +61,21 @@ export function setupCallKeep() {
   }
 
   RNCallKeep.addEventListener("answerCall", ({ callUUID }) => {
-    // Full-screen notification handles accept logic and navigation.
-    // CallKeep answerCall only marks the call active for audio routing.
-    if (callUUID) {
-      RNCallKeep.setCurrentCallActive(callUUID);
-    }
+    if (!callUUID) return;
+    RNCallKeep.setCurrentCallActive(callUUID);
+    // On iOS the CallKit sheet is the only accept surface (there is no
+    // full-screen notification), so run the shared accept flow from here.
+    // Android's accept comes through the full-screen notification events —
+    // acceptCall() is idempotent via the isCallActive guard either way.
+    // Dynamic import avoids a module cycle with full-screen-call-notification.
+    void import("@/lib/full-screen-call-notification")
+      .then((mod) => mod.acceptCall(callUUID))
+      .catch((err) => {
+        console.warn(
+          "[callkeep] answerCall accept failed:",
+          err instanceof Error ? err.message : String(err),
+        );
+      });
   });
 
   RNCallKeep.addEventListener("endCall", ({ callUUID }) => {
@@ -116,32 +126,17 @@ export function reportCallConnected(callSessionId: string) {
   }
 }
 
-// Route audio output between speaker and earpiece.  iOS uses CallKit's native
-// audio-route override; Android falls back to expo-av's earpiece flag because
-// CallKeep.toggleAudioRouteSpeaker is iOS-only.
-export async function setSpeakerphone(callUUID: string, on: boolean) {
-  try {
-    if (Platform.OS === "ios") {
-      RNCallKeep.toggleAudioRouteSpeaker(callUUID, on);
-    } else {
-      const { Audio } = await import("expo-av");
-      await Audio.setAudioModeAsync({
-        playsInSilentModeIOS: true,
-        playThroughEarpieceAndroid: !on,
-      });
-    }
-  } catch (err) {
-    console.warn(
-      "[callkeep] setSpeakerphone failed:",
-      err instanceof Error ? err.message : String(err),
-    );
-  }
-}
+// Speaker/earpiece routing now lives in lib/call-audio-session.ts (LiveKit's
+// native AudioSession) — the old expo-av based setSpeakerphone was the source
+// of the "remote voice on the media stream" bug and has been removed.
 
 async function fetch_reject(callSessionId: string) {
   try {
     const { api } = await import("@/lib/api");
-    await api.post(`/calls/${callSessionId}/reject`);
+    const { getDeviceId } = await import("@/lib/app-identity");
+    await api.post(`/calls/${callSessionId}/reject`, {
+      deviceId: getDeviceId(),
+    });
   } catch (err) {
     console.warn(
       "[callkeep] reject API call failed:",

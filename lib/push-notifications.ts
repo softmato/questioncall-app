@@ -1,9 +1,9 @@
-import { Platform, Alert, Linking } from "react-native";
+import { Platform, Alert, Linking, NativeModules } from "react-native";
+import AsyncStorage from "@react-native-async-storage/async-storage";
 import * as Notifications from "expo-notifications";
 import * as Device from "expo-device";
 import { api } from "@/lib/api";
-import { displayIncomingCall, incomingCallMetadataMap } from "@/lib/callkeep-setup";
-import { showFullScreenCallNotification } from "@/lib/full-screen-call-notification";
+import { surfaceIncomingCall } from "@/lib/call-dispatch";
 
 const EAS_PROJECT_ID = "86d256ec-943f-49e8-adaf-659400e4edac";
 
@@ -35,16 +35,33 @@ Notifications.setNotificationHandler({
     if (data?.callSessionId) {
       const mode: "AUDIO" | "VIDEO" = data.mode === "VIDEO" ? "VIDEO" : "AUDIO";
       const callerName = data.callerName ?? "Incoming call";
-      // Cache metadata so the native answer event can recover the mode/callerId
-      // (the answer event only delivers a callUUID).
-      incomingCallMetadataMap.set(data.callSessionId, {
+      // Go through the shared funnel rather than ringing directly. Pusher
+      // usually beats the push by around a second, and this handler used to
+      // ring a second time on top of it — including on top of a call the user
+      // had already accepted. The funnel also caches the metadata the native
+      // answer event needs (it only delivers a callUUID).
+      //
+      // On Android calls are sent data-only and CallNotificationService claims
+      // them before Expo ever gets here, so this branch is now a fallback for
+      // anything that reaches JS by another route. It shares the same dedupe
+      // store as the native service, so it cannot double-ring.
+      await surfaceIncomingCall({
+        callSessionId: data.callSessionId,
+        callerName,
         mode,
         callerId: String(data.callerId ?? ""),
         channelId: String(data.channelId ?? ""),
-        callerName,
       });
-      displayIncomingCall(data.callSessionId, callerName, mode === "VIDEO");
-      showFullScreenCallNotification(data.callSessionId, callerName, mode === "VIDEO");
+      // Call pushes now carry real title/body so they still ring when the app
+      // has been killed (see web/lib/push/web-push.ts). The cost is that a
+      // tray copy can be presented while the app is alive — which would sit
+      // behind the full-screen call UI we just launched. Reaching this handler
+      // at all means JS is running and has taken over, so clear it. When the
+      // app is killed this never runs and the system notification correctly
+      // survives as the only way to answer.
+      void Notifications.dismissNotificationAsync(notification.request.identifier).catch(
+        () => {},
+      );
       return {
         shouldShowAlert: false,
         shouldPlaySound: false,
@@ -65,12 +82,25 @@ Notifications.setNotificationHandler({
   },
 });
 
+/**
+ * Android channel id for incoming calls. Must match CALL_CHANNEL_ID in
+ * web/lib/notifications/metadata.ts — the server puts this on the push, and
+ * Android drops the notification's sound/importance on the floor if the id
+ * doesn't resolve to a channel the app created.
+ */
+export const CALL_CHANNEL_ID = "calls_v2";
+
 async function setupAndroidChannels() {
   await Notifications.setNotificationChannelAsync("chat", {
     name: "Chat Messages",
     importance: Notifications.AndroidImportance.MAX,
     vibrationPattern: [0, 250, 250, 250],
     lightColor: "#3B82F6",
+    // Show the message on the lock screen instead of "1 new notification", so
+    // it's readable without unlocking. (Android only wakes the screen for
+    // full-screen intents, which are reserved for calls — a normal message
+    // notification lights the screen at most, and only on some OEMs.)
+    lockscreenVisibility: Notifications.AndroidNotificationVisibility.PUBLIC,
     sound: "notification_sound",
   });
   await Notifications.setNotificationChannelAsync("questions", {
@@ -80,13 +110,48 @@ async function setupAndroidChannels() {
     lightColor: "#3B82F6",
     sound: "notification_sound",
   });
-  await Notifications.setNotificationChannelAsync("calls", {
+  // The only channel a *killed* app can ring through: with no JS alive, the
+  // native call UI never runs and Android renders this notification itself,
+  // using nothing but the channel's own settings. So this channel has to carry
+  // the ring on its own — the actual ringtone (not the short message chime),
+  // a call-length vibration, DND bypass, and lock-screen visibility so the
+  // Accept/Decline actions are reachable without unlocking.
+  //
+  // NOTE the "_v2" id. Android freezes a channel's sound/importance/vibration
+  // the moment it is first created; later setNotificationChannelAsync calls
+  // with the same id only rename it. The old "calls" channel was created with
+  // the short message chime, so upgrading in place would have been a silent
+  // no-op for every existing install. A new id is the only way to ship changed
+  // channel settings — and it must stay in step with CALL_CHANNEL_ID in
+  // web/lib/notifications/metadata.ts, which is what the server sends.
+  await Notifications.setNotificationChannelAsync(CALL_CHANNEL_ID, {
     name: "Incoming Calls",
     importance: Notifications.AndroidImportance.MAX,
-    vibrationPattern: [0, 500, 250, 500],
+    vibrationPattern: [0, 1000, 800, 1000, 800, 1000],
     lightColor: "#22c55e",
     enableLights: true,
     enableVibrate: true,
+    // Best effort: silently ignored unless the user grants Do Not Disturb
+    // access. Worth setting — a missed call is worse than a missed chime.
+    bypassDnd: true,
+    lockscreenVisibility: Notifications.AndroidNotificationVisibility.PUBLIC,
+    sound: "incoming_ringtone",
+  });
+  // The superseded channel is deliberately kept alive, not deleted.
+  //
+  // A server that has not yet deployed the matching CALL_CHANNEL_ID still sends
+  // calls tagged "calls". Deleting the channel makes those pushes render
+  // unpredictably or not at all, which turns a routine deploy-order skew into
+  // silently dropped calls. Keeping it costs one extra row in system settings
+  // and means a mismatch degrades to "rings with the old sound" instead.
+  await Notifications.setNotificationChannelAsync("calls", {
+    name: "Incoming Calls (legacy)",
+    importance: Notifications.AndroidImportance.MAX,
+    vibrationPattern: [0, 1000, 800, 1000],
+    lightColor: "#22c55e",
+    enableLights: true,
+    enableVibrate: true,
+    lockscreenVisibility: Notifications.AndroidNotificationVisibility.PUBLIC,
     sound: "notification_sound",
   });
   await Notifications.setNotificationChannelAsync("wallet", {
@@ -102,6 +167,91 @@ async function setupAndroidChannels() {
     lightColor: "#3B82F6",
     sound: "notification_sound",
   });
+}
+
+/** Action identifiers on the incoming-call notification, shared with `_layout`. */
+export const CALL_ACTION_ACCEPT = "accept";
+export const CALL_ACTION_DECLINE = "decline";
+export const CALL_CATEGORY_ID = "incoming_call";
+
+/**
+ * Give the incoming-call notification Accept / Decline buttons.
+ *
+ * The server has always tagged call pushes with `categoryId: "incoming_call"`
+ * (see web/lib/push/web-push.ts) but nothing ever registered that category, so
+ * the tag was inert and a call arriving at a killed app rendered as a plain
+ * line of text with no way to answer from the shade.
+ *
+ * This is NOT the WhatsApp-style full-screen ringing UI, and it deliberately
+ * stops short of it. Waking the screen from a killed app needs a notification
+ * posted with setFullScreenIntent, which only native code can do — i.e. our own
+ * FirebaseMessagingService receiving the call message before Firebase renders
+ * it. That was attempted once and ANR'd the app badly enough to be reverted;
+ * `plugins/withCallNotificationService.js` and `withCallNotificationDeps.js`
+ * are the orphaned remains and are intentionally NOT in app.json's plugin list.
+ * Do not re-enable them without redoing that work properly.
+ *
+ * What this does give a killed app: the real ringtone (via the calls channel),
+ * a lock-screen-visible notification, and Accept/Decline without unlocking.
+ */
+async function setupCallNotificationCategory() {
+  await Notifications.setNotificationCategoryAsync(CALL_CATEGORY_ID, [
+    {
+      identifier: CALL_ACTION_ACCEPT,
+      buttonTitle: "Accept",
+      options: { opensAppToForeground: true },
+    },
+    {
+      identifier: CALL_ACTION_DECLINE,
+      buttonTitle: "Decline",
+      options: { opensAppToForeground: false, isDestructive: true },
+    },
+  ]);
+}
+
+const FULL_SCREEN_INTENT_PROMPT_KEY = "questioncall.fullScreenIntentPromptShown";
+
+type CallNativeModule = {
+  canUseFullScreenIntent?: () => Promise<boolean>;
+  openFullScreenIntentSettings?: () => void;
+};
+
+/**
+ * Android 14 removed the automatic USE_FULL_SCREEN_INTENT grant for most apps.
+ * Without it the system downgrades an incoming call to a plain heads-up banner
+ * — the screen stays off and the call looks like any other notification, which
+ * is precisely the behaviour the full-screen path exists to fix. Nothing warns
+ * you: it just silently does less.
+ *
+ * Ask once per install. Someone who says no keeps working calls, just without
+ * the screen waking, and can flip it on later in system settings.
+ */
+async function ensureFullScreenIntentPermission(): Promise<void> {
+  if (Platform.OS !== "android") return;
+
+  const native = NativeModules.CallForegroundService as CallNativeModule | undefined;
+  if (!native?.canUseFullScreenIntent) return;
+
+  const granted = await native.canUseFullScreenIntent().catch(() => true);
+  if (granted) return;
+
+  const alreadyAsked = await AsyncStorage.getItem(FULL_SCREEN_INTENT_PROMPT_KEY).catch(
+    () => null,
+  );
+  if (alreadyAsked) return;
+  await AsyncStorage.setItem(FULL_SCREEN_INTENT_PROMPT_KEY, "1").catch(() => {});
+
+  Alert.alert(
+    "Let calls ring full screen",
+    "Android needs one extra permission before QuestionCall can wake your screen for an incoming call, the way a phone call does.\n\nWithout it, calls still arrive — but only as a normal notification.",
+    [
+      { text: "Not now", style: "cancel" },
+      {
+        text: "Open Settings",
+        onPress: () => native.openFullScreenIntentSettings?.(),
+      },
+    ],
+  );
 }
 
 /** Show an alert directing the user to system settings to enable notifications manually. */
@@ -192,6 +342,20 @@ export async function registerForPushNotifications(): Promise<string | null> {
     await setupAndroidChannels();
   }
 
+  await setupCallNotificationCategory().catch((err) => {
+    console.warn(
+      "[push] Failed to register the incoming-call category:",
+      err?.message ?? err,
+    );
+  });
+
+  await ensureFullScreenIntentPermission().catch((err) => {
+    console.warn(
+      "[push] Full-screen intent permission check failed:",
+      err?.message ?? err,
+    );
+  });
+
   const tokenData = await Notifications.getExpoPushTokenAsync({
     projectId: EAS_PROJECT_ID,
   }).catch((err) => {
@@ -274,6 +438,32 @@ export function addNotificationResponseListener(
   handler: (response: Notifications.NotificationResponse) => void,
 ) {
   return Notifications.addNotificationResponseReceivedListener(handler);
+}
+
+/**
+ * The notification tap that cold-started the app, if there was one.
+ *
+ * `addNotificationResponseReceivedListener` only sees responses delivered
+ * after it subscribes, and `_layout` registers it behind auth rehydration. A
+ * tap that launches the app from killed is therefore already delivered by the
+ * time anything is listening, and is silently dropped — the user answers a
+ * call and lands on the home screen.
+ *
+ * That matters most for calls: when an OEM blocks the data-only push from
+ * starting our process, the server's fallback tier (see
+ * web/app/api/calls/create/route.ts) sends a system-rendered notification, and
+ * tapping it is the only way to answer. Checking this explicitly at boot is
+ * what makes that route work.
+ *
+ * Callers must dedupe against the listener — both can surface the same
+ * response.
+ */
+export async function getInitialNotificationResponse(): Promise<Notifications.NotificationResponse | null> {
+  try {
+    return await Notifications.getLastNotificationResponseAsync();
+  } catch {
+    return null;
+  }
 }
 
 export function addNotificationReceivedListener(

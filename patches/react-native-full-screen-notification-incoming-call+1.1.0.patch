@@ -25,7 +25,7 @@ index 3395f00..f88c697 100644
      } else {
        setContentView(R.layout.activity_call_incoming);
      }
-@@ -166,15 +156,39 @@ public class IncomingCallActivity extends AppCompatActivity implements DefaultHa
+@@ -166,15 +156,45 @@ public class IncomingCallActivity extends AppCompatActivity implements DefaultHa
  
    private void acceptDialing() {
      active = false;
@@ -53,6 +53,11 @@ index 3395f00..f88c697 100644
 +      Intent launchIntent = getPackageManager().getLaunchIntentForPackage(packageName);
 +      if (launchIntent != null) {
 +        launchIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_REORDER_TO_FRONT);
++        // This activity is allowed over the keyguard; MainActivity is not,
++        // unless told. Without this the call connects but the user just sees
++        // the lock screen until they unlock. MainActivity reads the extra
++        // before its first frame; JS clears the flag when the call ends.
++        launchIntent.putExtra("questioncall.showOverKeyguard", true);
 +        startActivity(launchIntent);
 +      }
 +    } else {
@@ -60,6 +65,7 @@ index 3395f00..f88c697 100644
 +      Intent deepLink = new Intent(Intent.ACTION_VIEW,
 +        android.net.Uri.parse("questioncall://call/" + uuid));
 +      deepLink.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TOP);
++      deepLink.putExtra("questioncall.showOverKeyguard", true);
 +      startActivity(deepLink);
 +    }
 +
@@ -67,7 +73,7 @@ index 3395f00..f88c697 100644
        finishAndRemoveTask();
      } else {
 diff --git a/node_modules/react-native-full-screen-notification-incoming-call/android/src/main/java/com/reactnativefullscreennotificationincomingcall/IncomingCallService.java b/node_modules/react-native-full-screen-notification-incoming-call/android/src/main/java/com/reactnativefullscreennotificationincomingcall/IncomingCallService.java
-index 502fe36..ee4bccc 100644
+index 502fe36..49ee298 100644
 --- a/node_modules/react-native-full-screen-notification-incoming-call/android/src/main/java/com/reactnativefullscreennotificationincomingcall/IncomingCallService.java
 +++ b/node_modules/react-native-full-screen-notification-incoming-call/android/src/main/java/com/reactnativefullscreennotificationincomingcall/IncomingCallService.java
 @@ -17,6 +17,8 @@ import android.graphics.Color;
@@ -98,7 +104,7 @@ index 502fe36..ee4bccc 100644
      NotificationReceiverHandler.updateCanClick(true);
      registerBroadcastPressEvent();
  
-@@ -150,6 +157,39 @@ public class IncomingCallService extends Service {
+@@ -150,6 +157,47 @@ public class IncomingCallService extends Service {
      } else {
        startForeground(1, notification);
      }
@@ -109,6 +115,14 @@ index 502fe36..ee4bccc 100644
 +
 +  private void startRingtone(Intent intent) {
 +    try {
++      // Respect the system ringer mode (WhatsApp behavior): raw MediaPlayer
++      // ignores silent/vibrate, so check explicitly. Vibration still runs via
++      // the notification's vibrate pattern.
++      AudioManager audioManager = (AudioManager) getSystemService(Context.AUDIO_SERVICE);
++      if (audioManager != null
++          && audioManager.getRingerMode() != AudioManager.RINGER_MODE_NORMAL) {
++        return;
++      }
 +      Bundle bundle = intent.getExtras();
 +      Uri soundUri = getCustomSoundUri(getApplicationContext(), bundle);
 +      mediaPlayer = new MediaPlayer();
@@ -138,7 +152,7 @@ index 502fe36..ee4bccc 100644
    }
  
    private PendingIntent onButtonNotificationClick(int id, String action, String eventName) {
-@@ -212,7 +252,7 @@ public class IncomingCallService extends Service {
+@@ -212,7 +260,7 @@ public class IncomingCallService extends Service {
        .setOngoing(true)
        .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
        .setVibrate(new long[]{0, 1000, 800})
@@ -147,7 +161,7 @@ index 502fe36..ee4bccc 100644
        .setFullScreenIntent(emptyPendingIntent, true);
    }
  
-@@ -245,11 +285,7 @@ public class IncomingCallService extends Service {
+@@ -245,11 +293,7 @@ public class IncomingCallService extends Service {
      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
        NotificationManager notificationManager = (NotificationManager) context.getSystemService(Context.NOTIFICATION_SERVICE);
        NotificationChannel notificationChannel = new NotificationChannel(channelId, channelName, NotificationManager.IMPORTANCE_HIGH);
@@ -160,7 +174,7 @@ index 502fe36..ee4bccc 100644
        notificationChannel.enableLights(true);
        notificationChannel.enableVibration(true);
        notificationChannel.setLightColor(Color.WHITE);
-@@ -303,6 +339,7 @@ public class IncomingCallService extends Service {
+@@ -303,6 +347,7 @@ public class IncomingCallService extends Service {
    public void onDestroy() {
      super.onDestroy();
      Log.d(TAG, "onDestroy service");
@@ -168,7 +182,7 @@ index 502fe36..ee4bccc 100644
      cancelTimer();
      stopForeground(true);
      unregisterBroadcastPressEvent();
-@@ -341,7 +378,7 @@ public class IncomingCallService extends Service {
+@@ -341,7 +386,7 @@ public class IncomingCallService extends Service {
          params.putString("endAction", Constants.ACTION_HIDE_CALL);
          FullScreenNotificationIncomingCallModule.sendEventToJs(Constants.RNNotificationEndCallAction, params);
          cancelTimer();
@@ -177,7 +191,7 @@ index 502fe36..ee4bccc 100644
        }
      };
      callhandle.postDelayed(handleTimeout, timeoutNumber);
-@@ -392,7 +429,7 @@ public class IncomingCallService extends Service {
+@@ -392,7 +437,7 @@ public class IncomingCallService extends Service {
            params.putString("callUUID", uuid);
            params.putString("endAction", Constants.ACTION_REJECTED_CALL);
            FullScreenNotificationIncomingCallModule.sendEventToJs(Constants.RNNotificationEndCallAction, params);
@@ -190,7 +204,7 @@ diff --git a/node_modules/react-native-full-screen-notification-incoming-call/an
 index beb50db..d8cfd87 100644
 --- a/node_modules/react-native-full-screen-notification-incoming-call/android/src/main/java/com/reactnativefullscreennotificationincomingcall/NotificationReceiverHandler.java
 +++ b/node_modules/react-native-full-screen-notification-incoming-call/android/src/main/java/com/reactnativefullscreennotificationincomingcall/NotificationReceiverHandler.java
-@@ -72,8 +72,25 @@ public class NotificationReceiverHandler {
+@@ -72,8 +72,40 @@ public class NotificationReceiverHandler {
      }
      params.putBoolean("accept", true);
      params.putString("callUUID", uuid);
@@ -211,7 +225,22 @@ index beb50db..d8cfd87 100644
 +        Intent deepLink = new Intent(Intent.ACTION_VIEW,
 +          android.net.Uri.parse("questioncall://call/" + uuid));
 +        deepLink.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TOP);
++        // Allow MainActivity over the keyguard — see IncomingCallActivity.
++        deepLink.putExtra("questioncall.showOverKeyguard", true);
 +        context.startActivity(deepLink);
++      } else {
++        // App alive but not necessarily on screen: accepting from the
++        // notification action alone would leave the user on the lock screen (or
++        // on whatever app they were in) while the call connected in the
++        // background. Bring the activity forward, same as accepting from the
++        // full-screen ringing UI does.
++        Intent launchIntent = context.getPackageManager()
++          .getLaunchIntentForPackage(context.getPackageName());
++        if (launchIntent != null) {
++          launchIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_REORDER_TO_FRONT);
++          launchIntent.putExtra("questioncall.showOverKeyguard", true);
++          context.startActivity(launchIntent);
++        }
 +      }
 +    }
    }

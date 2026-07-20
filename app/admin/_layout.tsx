@@ -57,6 +57,7 @@ export default function AdminLayout() {
       <Stack.Screen name="courses" />
       <Stack.Screen name="chapters" />
       <Stack.Screen name="coupons" />
+      <Stack.Screen name="subscription-coupons" />
       <Stack.Screen name="services" />
       <Stack.Screen name="payment-config" />
       <Stack.Screen name="receipts" />

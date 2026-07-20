@@ -1,5 +1,5 @@
 import { Platform, NativeModules, NativeEventEmitter } from "react-native";
-import { router } from "expo-router";
+import { openCall } from "@/lib/call-ui-store";
 import {
   endCallKeepCall,
   reportCallConnected,
@@ -43,7 +43,9 @@ export function setupFullScreenCallListeners() {
   });
 }
 
-async function acceptCall(callSessionId: string) {
+// Exported: also invoked by the CallKeep answerCall listener (the only accept
+// surface on iOS). Idempotent via the isCallActive guard.
+export async function acceptCall(callSessionId: string) {
   // Guard: if we're already inside this call, the notification is a stale
   // duplicate (e.g. native FCM re-dispatch). Just clear it instead of
   // re-running /accept and re-navigating to the same live screen.
@@ -53,6 +55,13 @@ async function acceptCall(callSessionId: string) {
     endCallKeepCall(callSessionId);
     return;
   }
+
+  // Stop ringing before anything else. When accept arrives through the native
+  // notification the library tears its own service down, but the CallKeep
+  // answerCall and in-app accept paths land here directly — leaving
+  // IncomingCallService (and its looping ringtone) running until the 45s
+  // timeout. Harmless to repeat: hideNotification is a stopService call.
+  hideFullScreenCallNotification();
 
   // Pull cached metadata captured at incoming-call time.  Pusher/push payload
   // mode is authoritative — the server /accept response is a fallback for
@@ -75,20 +84,43 @@ async function acceptCall(callSessionId: string) {
     };
     incomingCallMetadataMap.delete(callSessionId);
     reportCallConnected(callSessionId);
-    router.replace(`/call/${callSessionId}` as any);
+    openCall({ roomId: callSessionId, mode: meta.mode });
     // Fire the accept API in the background — server still needs to flip
     // status from RINGING to ACTIVE and notify the caller via Pusher. The
     // user is already looking at the call screen by the time it returns.
+    //
+    // This is the only thing that tells the caller we picked up, so a silent
+    // failure here strands both sides: the callee sits in the room on
+    // "waiting for user" while the caller keeps ringing. Retry once before
+    // giving up, and say so rather than failing quietly.
     void (async () => {
-      try {
-        const { api } = await import("@/lib/api");
-        await api.post(`/calls/${callSessionId}/accept`);
-      } catch (err: any) {
-        if (err?.response?.status !== 409) {
-          console.warn(
-            "[acceptCall] background /accept failed:",
-            err instanceof Error ? err.message : String(err),
-          );
+      const { api } = await import("@/lib/api");
+      const { getDeviceId } = await import("@/lib/app-identity");
+
+      for (let attempt = 1; attempt <= 2; attempt++) {
+        try {
+          await api.post(`/calls/${callSessionId}/accept`, {
+            deviceId: getDeviceId(),
+          });
+          return;
+        } catch (err: any) {
+          // 409 = the server already moved this call out of RINGING (another
+          // device accepted, or our own earlier retry landed). Nothing to do.
+          if (err?.response?.status === 409) return;
+          if (attempt === 2) {
+            console.warn(
+              "[acceptCall] background /accept failed after retry:",
+              err instanceof Error ? err.message : String(err),
+            );
+            const Toast = (await import("react-native-toast-message")).default;
+            Toast.show({
+              type: "error",
+              text1: "Couldn't connect the call",
+              text2: "The other side wasn't told you answered. Try calling back.",
+            });
+            return;
+          }
+          await new Promise((r) => setTimeout(r, 600));
         }
       }
     })();
@@ -99,7 +131,10 @@ async function acceptCall(callSessionId: string) {
   // token for some reason). Use the original blocking /accept path.
   try {
     const { api } = await import("@/lib/api");
-    const res = await api.post(`/calls/${callSessionId}/accept`);
+    const { getDeviceId } = await import("@/lib/app-identity");
+    const res = await api.post(`/calls/${callSessionId}/accept`, {
+      deviceId: getDeviceId(),
+    });
     const data = res.data as any;
     if (data?.token && data?.serverUrl) {
       const serverMode =
@@ -124,14 +159,20 @@ async function acceptCall(callSessionId: string) {
   }
   incomingCallMetadataMap.delete(callSessionId);
   reportCallConnected(callSessionId);
-  router.replace(`/call/${callSessionId}` as any);
+  openCall({ roomId: callSessionId, mode: meta?.mode });
 }
 
-async function rejectCall(callSessionId: string) {
+// Exported: also invoked by the notification's Decline action (see _layout).
+export async function rejectCall(callSessionId: string) {
   incomingCallMetadataMap.delete(callSessionId);
+  hideFullScreenCallNotification();
+  endCallKeepCall(callSessionId);
   try {
     const { api } = await import("@/lib/api");
-    await api.post(`/calls/${callSessionId}/reject`);
+    const { getDeviceId } = await import("@/lib/app-identity");
+    await api.post(`/calls/${callSessionId}/reject`, {
+      deviceId: getDeviceId(),
+    });
   } catch {}
 }
 

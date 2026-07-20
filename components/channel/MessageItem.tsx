@@ -2,6 +2,7 @@ import React, { useState, useRef, useEffect, useCallback } from "react";
 import { View, Text, TouchableOpacity, Image, ActivityIndicator } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
 import { Audio } from "expo-av";
+import { hasAnyActiveCall } from "@/lib/active-call";
 import type { ChatMessage } from "@/store/slices/channelSlice";
 
 type Props = {
@@ -107,12 +108,17 @@ function AudioMessagePlayer({
     }
     setIsLoading(true);
     try {
-      await Audio.setAudioModeAsync({
-        playsInSilentModeIOS: true,
-        staysActiveInBackground: false,
-        shouldDuckAndroid: true,
-        playThroughEarpieceAndroid: false,
-      });
+      // Never touch the audio mode while a call is live — flipping Android out
+      // of MODE_IN_COMMUNICATION would knock the call's voice onto the media
+      // stream (the "remote voice missing/tiny" bug).
+      if (!hasAnyActiveCall()) {
+        await Audio.setAudioModeAsync({
+          playsInSilentModeIOS: true,
+          staysActiveInBackground: false,
+          shouldDuckAndroid: true,
+          playThroughEarpieceAndroid: false,
+        });
+      }
       const { sound } = await Audio.Sound.createAsync(
         { uri: mediaUrl },
         { shouldPlay: true },

@@ -713,6 +713,21 @@ export default function FeedScreen() {
 
         const timerDeadline = res.data?.timerDeadline;
         const channelId = updated.channelId;
+
+        // The accept response already carries the full channel payload, so seed
+        // the cache here and the workspace screen renders populated on first
+        // paint instead of spinning through its own GET /channels/:id.
+        const bootstrap = res.data?.channelBootstrap;
+        if (channelId && bootstrap?.channel) {
+          dispatch(
+            setChannelData({
+              channelId,
+              detail: bootstrap.channel,
+              messages: bootstrap.messages ?? [],
+            }),
+          );
+        }
+
         if (timerDeadline && channelId) {
           scheduleAnswerDeadlineReminder({
             questionTitle: updated.title,

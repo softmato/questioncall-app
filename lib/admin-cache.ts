@@ -26,6 +26,7 @@ export type AdminCacheKey =
   | "courses"
   | "chapters"
   | "coupons"
+  | "subscription-coupons"
   | "services"
   | "config"
   | "receipts"
@@ -109,6 +110,11 @@ const PREFETCH_SOURCES: PrefetchSource[] = [
     url: "/mobile/admin/coupons",
     select: (r) => asArray(r?.coupons),
   },
+  {
+    key: "subscription-coupons",
+    url: "/mobile/admin/subscription-coupons",
+    select: (r) => asArray(r?.coupons),
+  },
   { key: "services", url: "/mobile/admin/services", select: (r) => asArray(r?.services) },
   { key: "config", url: "/mobile/admin/config" },
   {
@@ -130,15 +136,28 @@ const PREFETCH_SOURCES: PrefetchSource[] = [
 let inFlight: Promise<void> | null = null;
 
 /**
- * Fire every section GET in parallel and cache each result. Failures are
- * swallowed per-section — the matching screen will retry and surface its own
- * error on open, so one dead endpoint never blocks the rest of the prefetch.
- * Concurrent calls share one in-flight run.
+ * How long a prefetched section stays warm enough to skip on a re-entry.
+ * `inFlight` only dedupes *concurrent* runs, so without this leaving the admin
+ * group and coming back remounts the layout and refires all ~19 GETs. Screens
+ * still revalidate themselves on mount, so a stale-but-warm cache only affects
+ * the first paint, never the data the admin ends up acting on.
+ */
+const PREFETCH_TTL_MS = 2 * 60 * 1000;
+
+/**
+ * Fire every not-recently-cached section GET in parallel and cache each result.
+ * Failures are swallowed per-section — the matching screen will retry and
+ * surface its own error on open, so one dead endpoint never blocks the rest of
+ * the prefetch. Concurrent calls share one in-flight run.
  */
 export function prefetchAdmin(): Promise<void> {
   if (inFlight) return inFlight;
+
+  const stale = PREFETCH_SOURCES.filter(({ key }) => cacheAge(key) > PREFETCH_TTL_MS);
+  if (stale.length === 0) return Promise.resolve();
+
   inFlight = Promise.allSettled(
-    PREFETCH_SOURCES.map(async ({ key, url, select }) => {
+    stale.map(async ({ key, url, select }) => {
       const res = await api.get(url);
       writeCache(key, select ? select(res.data) : res.data);
     }),

@@ -10,6 +10,7 @@ import {
   CALL_INCOMING_EVENT,
   CALL_CANCELLED_EVENT,
   CALL_MISSED_EVENT,
+  CALL_HANDLED_EVENT,
   getPusherClient,
   getPusherConfig,
   getUserPusherName,
@@ -26,40 +27,12 @@ import {
 import { updateChannelLastMessage, upsertChannel } from "@/store/slices/channelsSlice";
 import { updateUser } from "@/store/slices/userSlice";
 import { prependNotification } from "@/store/slices/notificationsSlice";
-import {
-  displayIncomingCall,
-  endCallKeepCall,
-  incomingCallMetadataMap,
-} from "@/lib/callkeep-setup";
-import {
-  showFullScreenCallNotification,
-  hideFullScreenCallNotification,
-} from "@/lib/full-screen-call-notification";
+import { endCallKeepCall, incomingCallMetadataMap } from "@/lib/callkeep-setup";
+import { hideFullScreenCallNotification } from "@/lib/full-screen-call-notification";
 import { prewarmCalleeRoom, clearCalleePrewarm } from "@/lib/call-prewarm";
 import { isCallActive } from "@/lib/active-call";
-
-// Dedupe window for repeat CALL_INCOMING_EVENT arrivals. Pusher can re-deliver
-// after reconnect, and the native FCM service (CallAwareMessagingService) also
-// dispatches the same call independently. Without this, the library's
-// `IncomingCallService.handleIncomingCall` stops + restarts the ringtone on the
-// second dispatch, producing a "double ring". Matches the 30s window on the
-// native side — see CallAwareMessagingService.kt#DEDUPE_WINDOW_MS.
-const CALL_DEDUPE_WINDOW_MS = 30_000;
-const recentCallDispatches = new Map<string, number>();
-
-function shouldDispatchCall(callSessionId: string): boolean {
-  const now = Date.now();
-  // Evict stale entries opportunistically so the map can't grow unbounded.
-  for (const [id, ts] of recentCallDispatches) {
-    if (now - ts > CALL_DEDUPE_WINDOW_MS) recentCallDispatches.delete(id);
-  }
-  const last = recentCallDispatches.get(callSessionId);
-  if (last !== undefined && now - last < CALL_DEDUPE_WINDOW_MS) {
-    return false;
-  }
-  recentCallDispatches.set(callSessionId, now);
-  return true;
-}
+import { surfaceIncomingCall, forgetCallDispatch } from "@/lib/call-dispatch";
+import { getDeviceId } from "@/lib/app-identity";
 
 type ChannelUpdatedPayload = {
   channelId: string;
@@ -183,38 +156,24 @@ export function RealtimeBridge() {
       );
     });
 
-    channel.bind(CALL_INCOMING_EVENT, (payload: any) => {
+    channel.bind(CALL_INCOMING_EVENT, async (payload: any) => {
       if (!payload?.callSessionId) return;
       const callSessionId = String(payload.callSessionId);
       const callerName = String(payload.callerName ?? "Unknown");
       const mode: "AUDIO" | "VIDEO" = payload.mode === "VIDEO" ? "VIDEO" : "AUDIO";
       const channelId = String(payload.channelId ?? "");
-      // Cache the authoritative metadata BEFORE the dedupe check. We always
-      // want the freshest metadata cached even if we skip the visible dispatch
-      // — a later acceptCall reads this map for mode/callerId.
-      incomingCallMetadataMap.set(callSessionId, {
+
+      // Shared funnel: caches metadata, then rings only if the native FCM
+      // service (or an earlier Pusher delivery) hasn't already rung this call.
+      // The claim it awaits is a SharedPreferences round-trip, sub-millisecond.
+      const surfaced = await surfaceIncomingCall({
+        callSessionId,
+        callerName,
         mode,
         callerId: String(payload.callerId ?? ""),
         channelId,
-        callerName,
       });
-      // Never resurface an incoming call for a session we're already inside.
-      // A Pusher reconnect can re-deliver CALL_INCOMING after the 30s dedupe
-      // window has expired; without this guard the native call UI pops up on
-      // top of the live call and accept/decline just bounce back to the same
-      // active session (the "stuck duplicate overlay" bug).
-      if (isCallActive(callSessionId)) {
-        return;
-      }
-      // Skip the visible dispatch if the same call was already surfaced (by
-      // a prior Pusher delivery, Pusher reconnect re-fire, or the native FCM
-      // service). The library's IncomingCallService restarts its ringtone on
-      // every dispatch and we don't want a double-ring.
-      if (!shouldDispatchCall(callSessionId)) {
-        return;
-      }
-      displayIncomingCall(callSessionId, callerName, mode === "VIDEO");
-      showFullScreenCallNotification(callSessionId, callerName, mode === "VIDEO");
+      if (!surfaced) return;
 
       // Pre-warm the callee's LiveKit room in the background while the
       // ringtone plays. The token was minted at create-time on the server
@@ -239,6 +198,7 @@ export function RealtimeBridge() {
       if (!payload?.callSessionId) return;
       const callSessionId = String(payload.callSessionId);
       incomingCallMetadataMap.delete(callSessionId);
+      forgetCallDispatch(callSessionId);
       endCallKeepCall(callSessionId);
       hideFullScreenCallNotification();
       clearCalleePrewarm(callSessionId);
@@ -248,6 +208,24 @@ export function RealtimeBridge() {
       if (!payload?.callSessionId) return;
       const callSessionId = String(payload.callSessionId);
       incomingCallMetadataMap.delete(callSessionId);
+      forgetCallDispatch(callSessionId);
+      endCallKeepCall(callSessionId);
+      hideFullScreenCallNotification();
+      clearCalleePrewarm(callSessionId);
+    });
+
+    // The call was accepted/rejected on another of THIS user's devices (same
+    // account on web + another phone) — dismiss our ringing surfaces
+    // immediately instead of letting them ring until the 45s timeout.
+    channel.bind(CALL_HANDLED_EVENT, (payload: any) => {
+      if (!payload?.callSessionId) return;
+      const callSessionId = String(payload.callSessionId);
+      // Ignore our own action's echo, and never tear down a call we're inside
+      // (this device is the one that accepted).
+      if (payload.byDeviceId && payload.byDeviceId === getDeviceId()) return;
+      if (isCallActive(callSessionId)) return;
+      incomingCallMetadataMap.delete(callSessionId);
+      forgetCallDispatch(callSessionId);
       endCallKeepCall(callSessionId);
       hideFullScreenCallNotification();
       clearCalleePrewarm(callSessionId);

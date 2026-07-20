@@ -4,18 +4,40 @@ import {
   ScrollView,
   StatusBar,
   Text,
+  TextInput,
   TouchableOpacity,
   View,
 } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
 import { router, useFocusEffect } from "expo-router";
+import Toast from "react-native-toast-message";
 
 import { useAppSelector } from "@/hooks/redux";
 import { useAppTheme } from "@/hooks/use-app-theme";
 import { usePlatformConfig } from "@/hooks/use-platform-config";
 import { api } from "@/lib/api";
+import { getRequestErrorMessage } from "@/lib/server-response";
 import { openWebCheckout } from "@/lib/web-checkout";
 import { PlanBadge } from "@/components/PlanBadge";
+
+type ValidatedPromo = {
+  code: string;
+  kind: "FREE_ACCESS" | "PERCENTAGE";
+  planSlug: string | null;
+  durationDays: number | null;
+  discountPercentage: number | null;
+};
+
+/**
+ * What an applied coupon does to one plan card. Prices are deliberately absent
+ * — paid amounts are only ever shown on the web checkout (Play Store rule), so
+ * in-app we communicate the offer, not the number.
+ */
+type PlanCouponEffect =
+  | { type: "none" }
+  | { type: "free"; durationDays: number | null }
+  | { type: "discount"; percentage: number }
+  | { type: "not-applicable" };
 
 interface SubscriptionInfo {
   subscriptionStatus: string;
@@ -47,6 +69,13 @@ export default function PlansScreen() {
   const [subInfo, setSubInfo] = useState<SubscriptionInfo | null>(null);
   const [loadingSub, setLoadingSub] = useState(false);
 
+  // Coupon entry lives inline at the top of the screen. FREE_ACCESS codes
+  // activate in-app (no payment involved → Play-Store-safe); PERCENTAGE codes
+  // travel with the hand-off to the compliant web checkout.
+  const [promoCode, setPromoCode] = useState("");
+  const [promoBusy, setPromoBusy] = useState(false);
+  const [promo, setPromo] = useState<ValidatedPromo | null>(null);
+
   const currentPlan = subInfo?.planSlug ?? user?.planSlug ?? "free";
   const plans = config?.plans ?? [];
 
@@ -66,6 +95,96 @@ export default function PlansScreen() {
   );
 
   const isLoading = configLoading || loadingSub;
+
+  const clearPromo = useCallback(() => {
+    setPromo(null);
+    setPromoCode("");
+  }, []);
+
+  const applyPromo = useCallback(async () => {
+    if (!promoCode.trim()) return;
+    setPromoBusy(true);
+    try {
+      const res = await api.post("/mobile/subscription/coupons/validate", {
+        code: promoCode.trim(),
+      });
+      if (!res.data?.valid) {
+        Toast.show({
+          type: "error",
+          text1: res.data?.message ?? "That code isn't valid",
+          position: "bottom",
+        });
+        setPromo(null);
+        return;
+      }
+      setPromo(res.data.coupon as ValidatedPromo);
+      Toast.show({
+        type: "success",
+        text1: "Coupon applied",
+        text2: "Your packages below have been updated.",
+        position: "bottom",
+      });
+    } catch (err) {
+      Toast.show({
+        type: "error",
+        text1: "Couldn't check that code",
+        text2: getRequestErrorMessage(err, "Please try again."),
+        position: "bottom",
+      });
+    } finally {
+      setPromoBusy(false);
+    }
+  }, [promoCode]);
+
+  const redeemPromo = useCallback(async () => {
+    if (!promo) return;
+    setPromoBusy(true);
+    try {
+      const res = await api.post("/mobile/subscription/coupons/redeem", {
+        code: promo.code,
+      });
+      Toast.show({
+        type: "success",
+        text1: `${res.data?.planName ?? "Plan"} activated 🎉`,
+        text2: res.data?.subscriptionEnd
+          ? `Active until ${new Date(res.data.subscriptionEnd).toLocaleDateString()}`
+          : undefined,
+        position: "bottom",
+      });
+      clearPromo();
+      void fetchSubscription();
+    } catch (err) {
+      Toast.show({
+        type: "error",
+        text1: "Couldn't redeem the code",
+        text2: getRequestErrorMessage(err, "Please try again."),
+        position: "bottom",
+      });
+    } finally {
+      setPromoBusy(false);
+    }
+  }, [promo, clearPromo, fetchSubscription]);
+
+  const effectForPlan = useCallback(
+    (slug: string): PlanCouponEffect => {
+      if (!promo || slug === "free") return { type: "none" };
+
+      if (promo.kind === "FREE_ACCESS") {
+        return promo.planSlug === slug
+          ? { type: "free", durationDays: promo.durationDays }
+          : { type: "not-applicable" };
+      }
+
+      if (promo.planSlug && promo.planSlug !== slug) {
+        return { type: "not-applicable" };
+      }
+
+      return typeof promo.discountPercentage === "number"
+        ? { type: "discount", percentage: promo.discountPercentage }
+        : { type: "not-applicable" };
+    },
+    [promo],
+  );
 
   const getPlanIcon = (slug: string): any => {
     if (slug === "go") return "flash-outline";
@@ -98,6 +217,80 @@ export default function PlansScreen() {
           contentContainerStyle={{ padding: 16, gap: 12, paddingBottom: 40 }}
           showsVerticalScrollIndicator={false}
         >
+          {/* Apply coupon — first thing on the screen, so a code is in place
+              before the user compares packages. */}
+          {user?.role === "STUDENT" ? (
+            promo ? (
+              <View
+                className="rounded-2xl border p-4"
+                style={{ borderColor: primaryColor, backgroundColor: primarySoftColor }}
+              >
+                <View className="flex-row items-center gap-2">
+                  <Ionicons name="pricetag" size={18} color={primaryColor} />
+                  <Text className="flex-1 text-sm font-bold text-foreground">
+                    {promo.code} applied
+                  </Text>
+                  <TouchableOpacity onPress={clearPromo} disabled={promoBusy}>
+                    <Text className="text-xs font-semibold text-muted-foreground">
+                      Remove
+                    </Text>
+                  </TouchableOpacity>
+                </View>
+                <Text className="mt-1.5 text-xs text-muted-foreground">
+                  {promo.kind === "FREE_ACCESS"
+                    ? `Unlocks the ${promo.planSlug?.toUpperCase()} plan${
+                        promo.durationDays ? ` for ${promo.durationDays} days` : ""
+                      } — completely free.`
+                    : `${promo.discountPercentage}% off ${
+                        promo.planSlug
+                          ? `the ${promo.planSlug.toUpperCase()} plan`
+                          : "any paid plan"
+                      }. Your packages below are updated.`}
+                </Text>
+              </View>
+            ) : (
+              <View
+                className="rounded-2xl border border-dashed p-4"
+                style={{ borderColor: primaryColor, backgroundColor: primarySoftColor }}
+              >
+                <View className="flex-row items-center gap-2">
+                  <Ionicons name="ticket-outline" size={18} color={primaryColor} />
+                  <Text className="text-sm font-bold text-foreground">
+                    Apply a coupon
+                  </Text>
+                </View>
+                <View className="mt-3 flex-row gap-2">
+                  <TextInput
+                    value={promoCode}
+                    onChangeText={(v) => setPromoCode(v.toUpperCase())}
+                    onSubmitEditing={() => void applyPromo()}
+                    placeholder="ENTER CODE"
+                    placeholderTextColor="#6B7280"
+                    autoCapitalize="characters"
+                    autoCorrect={false}
+                    className="flex-1 rounded-xl border border-border bg-background px-4 py-3 text-[15px] font-semibold tracking-widest text-foreground"
+                  />
+                  <TouchableOpacity
+                    onPress={() => void applyPromo()}
+                    disabled={promoBusy || !promoCode.trim()}
+                    activeOpacity={0.85}
+                    className="items-center justify-center rounded-xl px-5"
+                    style={{
+                      backgroundColor: primaryColor,
+                      opacity: promoBusy || !promoCode.trim() ? 0.6 : 1,
+                    }}
+                  >
+                    {promoBusy ? (
+                      <ActivityIndicator color="#fff" />
+                    ) : (
+                      <Text className="text-[15px] font-semibold text-white">Apply</Text>
+                    )}
+                  </TouchableOpacity>
+                </View>
+              </View>
+            )
+          ) : null}
+
           {/* Current plan info */}
           {subInfo ? (
             <View
@@ -140,6 +333,8 @@ export default function PlansScreen() {
             const isCurrent = currentPlan === plan.slug;
             const isPending = subInfo?.pendingManualPayment ?? false;
             const isPendingPlan = isPending && subInfo?.pendingPlanSlug === plan.slug;
+            const effect = effectForPlan(plan.slug);
+            const isCouponPlan = effect.type === "free" || effect.type === "discount";
 
             return (
               <View
@@ -149,10 +344,11 @@ export default function PlansScreen() {
                   backgroundColor: isCurrent ? primarySoftColor : cardColor,
                   borderColor: isPendingPlan
                     ? "#f59e0b"
-                    : isCurrent
+                    : isCouponPlan || isCurrent
                       ? primaryColor
                       : borderColor,
-                  borderWidth: isPendingPlan ? 2 : 1,
+                  borderWidth: isPendingPlan || isCouponPlan ? 2 : 1,
+                  opacity: effect.type === "not-applicable" ? 0.55 : 1,
                 }}
               >
                 <View className="p-5">
@@ -198,6 +394,40 @@ export default function PlansScreen() {
                     </View>
                   </View>
 
+                  {/* Coupon effect on this specific plan */}
+                  {effect.type === "free" ? (
+                    <View
+                      className="mt-4 flex-row items-center gap-2 rounded-xl px-3 py-2.5"
+                      style={{ backgroundColor: primarySoftColor }}
+                    >
+                      <Ionicons name="gift" size={16} color={primaryColor} />
+                      <Text
+                        className="flex-1 text-xs font-bold"
+                        style={{ color: primaryColor }}
+                      >
+                        FREE with {promo?.code}
+                        {effect.durationDays ? ` · ${effect.durationDays} days` : ""}
+                      </Text>
+                    </View>
+                  ) : effect.type === "discount" ? (
+                    <View
+                      className="mt-4 flex-row items-center gap-2 rounded-xl px-3 py-2.5"
+                      style={{ backgroundColor: primarySoftColor }}
+                    >
+                      <Ionicons name="pricetag" size={16} color={primaryColor} />
+                      <Text
+                        className="flex-1 text-xs font-bold"
+                        style={{ color: primaryColor }}
+                      >
+                        {effect.percentage}% off applied with {promo?.code}
+                      </Text>
+                    </View>
+                  ) : effect.type === "not-applicable" ? (
+                    <Text className="mt-4 text-xs text-muted-foreground">
+                      {promo?.code} doesn&apos;t apply to this plan.
+                    </Text>
+                  ) : null}
+
                   {/* Features */}
                   {plan.features?.length > 0 ? (
                     <View className="mt-4 gap-2">
@@ -212,12 +442,41 @@ export default function PlansScreen() {
                     </View>
                   ) : null}
 
-                  {/* Per-card link to the web membership page (Play-compliant:
-                      neutral "view on web", not an in-app purchase CTA). */}
-                  {!isCurrent ? (
+                  {/* CTA. A free-access coupon activates in-app (no payment);
+                      everything else is a neutral "view on web" hand-off. */}
+                  {!isCurrent && effect.type === "free" ? (
+                    <TouchableOpacity
+                      onPress={() => void redeemPromo()}
+                      disabled={promoBusy}
+                      activeOpacity={0.85}
+                      className="mt-4 flex-row items-center justify-center gap-1.5 rounded-xl py-3"
+                      style={{
+                        backgroundColor: primaryColor,
+                        opacity: promoBusy ? 0.6 : 1,
+                      }}
+                    >
+                      {promoBusy ? (
+                        <ActivityIndicator color="#fff" />
+                      ) : (
+                        <>
+                          <Ionicons name="gift-outline" size={15} color="#fff" />
+                          <Text className="text-sm font-semibold text-white">
+                            Activate free
+                          </Text>
+                        </>
+                      )}
+                    </TouchableOpacity>
+                  ) : !isCurrent ? (
                     <TouchableOpacity
                       onPress={() =>
-                        void openWebCheckout("subscription", plan.slug, fetchSubscription)
+                        void openWebCheckout(
+                          "subscription",
+                          plan.slug,
+                          fetchSubscription,
+                          effect.type === "discount" && promo
+                            ? { coupon: promo.code }
+                            : undefined,
+                        )
                       }
                       disabled={isPendingPlan}
                       activeOpacity={0.85}
@@ -237,7 +496,9 @@ export default function PlansScreen() {
                       >
                         {isPendingPlan
                           ? "Awaiting verification"
-                          : "Choose in your browser"}
+                          : effect.type === "discount"
+                            ? "Continue in your browser"
+                            : "Choose in your browser"}
                       </Text>
                     </TouchableOpacity>
                   ) : null}
@@ -262,7 +523,12 @@ export default function PlansScreen() {
                 className="flex-row items-center justify-center gap-2 rounded-xl py-3.5"
                 style={{ backgroundColor: primaryColor }}
                 onPress={() =>
-                  void openWebCheckout("subscription", undefined, fetchSubscription)
+                  void openWebCheckout(
+                    "subscription",
+                    undefined,
+                    fetchSubscription,
+                    promo?.kind === "PERCENTAGE" ? { coupon: promo.code } : undefined,
+                  )
                 }
               >
                 <Ionicons name="open-outline" size={16} color="#fff" />

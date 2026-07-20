@@ -217,69 +217,11 @@ export function clearCalleePrewarm(callSessionId?: string) {
   calleeSlot = null;
 }
 
-// ── Outgoing ringtone pre-start ───────────────────────────────────────────
-// Started the instant the call button is pressed (before navigation) so the
-// caller hears audio with zero perceived delay. The call screen consumes the
-// live Sound object via consumeOutgoingRingtone() instead of creating a new one.
-let outgoingRingtoneSound: import("expo-av").Audio.Sound | null = null;
-
-export async function startOutgoingRingtone() {
-  // Stop any leftover from a previous aborted call
-  await stopOutgoingRingtoneSingleton();
-  try {
-    const { Audio } = await import("expo-av");
-    await Audio.setAudioModeAsync({
-      playsInSilentModeIOS: true,
-      staysActiveInBackground: true,
-      shouldDuckAndroid: false,
-      // Route the ringback through the earpiece/voice-call stream. The caller
-      // has a live LiveKit/WebRTC room (pre-warmed + pre-joined) during RINGING,
-      // which owns the Android communication audio stream and ducks anything on
-      // the media stream. Playing on the call route lets the tone coexist —
-      // this is how WhatsApp's outgoing ringback behaves. (Android-only flag;
-      // ignored on iOS, where the ringtone already plays during RINGING.)
-      playThroughEarpieceAndroid: true,
-    });
-    const { sound } = await Audio.Sound.createAsync(
-      require("../assets/sounds/outgoing_ringtone.mp3"),
-      { shouldPlay: true, isLooping: true, volume: 1.0 },
-    );
-    await sound.setIsLoopingAsync(true);
-    outgoingRingtoneSound = sound;
-  } catch (err) {
-    console.warn(
-      "[call-prewarm] Failed to pre-start ringtone:",
-      err instanceof Error ? err.message : String(err),
-    );
-  }
-}
-
-export function consumeOutgoingRingtone(): import("expo-av").Audio.Sound | null {
-  const sound = outgoingRingtoneSound;
-  outgoingRingtoneSound = null;
-  return sound;
-}
-
-export async function stopOutgoingRingtoneSingleton() {
-  const sound = outgoingRingtoneSound;
-  outgoingRingtoneSound = null;
-  if (!sound) return;
-  try {
-    await sound.stopAsync();
-    await sound.unloadAsync();
-  } catch {}
-  // Reset audio session to neutral defaults so the ringtone's
-  // staysActiveInBackground / shouldDuckAndroid don't leak.
-  try {
-    const { Audio } = await import("expo-av");
-    await Audio.setAudioModeAsync({
-      playsInSilentModeIOS: false,
-      staysActiveInBackground: false,
-      shouldDuckAndroid: true,
-      playThroughEarpieceAndroid: false,
-    });
-  } catch {}
-}
+// NOTE: the outgoing ringback used to be pre-started here on button press and
+// handed to the call screen via a singleton. That handoff raced with the call
+// screen's consume (double ring / orphaned loop), and starting before the
+// server confirmed ringing wasn't WhatsApp behavior anyway. The ringback now
+// lives entirely in call-screen.tsx and starts once /calls/create resolves.
 
 // ── In-flight POST /calls/create (caller's optimistic-navigation buffer) ──
 export function setPendingCreate(

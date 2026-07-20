@@ -134,6 +134,13 @@ export const ADMIN_SECTION_GROUPS: AdminSectionGroup[] = [
         ready: true,
       },
       {
+        id: "subscription-coupons",
+        label: "Subscription Coupons",
+        href: "/admin/subscription-coupons",
+        icon: "ticket-outline",
+        ready: true,
+      },
+      {
         id: "live-sessions",
         label: "Live Sessions",
         href: "/admin/live-sessions",
