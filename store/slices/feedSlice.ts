@@ -102,7 +102,9 @@ export function normalizeFeedQuestion(raw: unknown): FeedQuestion {
       typeof data.askerUsername === "string" ? data.askerUsername : undefined,
     askerImage: typeof data.askerImage === "string" ? data.askerImage : undefined,
     askerIsOnline: data.askerIsOnline === true,
-    title: toStringValue(data.title, "Untitled question"),
+    // Optional since the ask flow went camera-first — a photo-only
+    // question has no title, and the card renders the photo instead.
+    title: toStringValue(data.title, ""),
     body: toStringValue(data.body, ""),
     images: toStringArray(data.images),
     answerFormat: toStringValue(data.answerFormat, "ANY") as FeedQuestion["answerFormat"],

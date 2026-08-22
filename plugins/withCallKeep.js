@@ -6,18 +6,24 @@ const {
   withDangerousMod,
 } = require("expo/config-plugins");
 
-const ANDROID_PACKAGE_PATH = path.join(
-  "android",
-  "app",
-  "src",
-  "main",
-  "java",
-  "com",
-  "questioncall",
-  "app",
-);
+/**
+ * Everything below is generated into the app's own Java package, so the package
+ * name is read from `android.package` in app.json rather than hardcoded — a
+ * rename there (e.g. the move to the Softmato namespace) must not need edits in
+ * this file. Kotlin templates carry `__APP_PACKAGE__` and are resolved by
+ * `applyPackage` at write time.
+ */
+const PACKAGE_TOKEN = /__APP_PACKAGE__/g;
 
-const CALL_FOREGROUND_SERVICE_KT = `package com.questioncall.app
+function androidPackageDir(pkg) {
+  return path.join("android", "app", "src", "main", "java", ...pkg.split("."));
+}
+
+function applyPackage(source, pkg) {
+  return source.replace(PACKAGE_TOKEN, pkg);
+}
+
+const CALL_FOREGROUND_SERVICE_KT = `package __APP_PACKAGE__
 
 import android.Manifest
 import android.app.Notification
@@ -36,8 +42,8 @@ import androidx.core.content.ContextCompat
 
 class CallForegroundService : Service() {
   companion object {
-    const val ACTION_START = "com.questioncall.app.CALL_FOREGROUND_START"
-    const val ACTION_STOP = "com.questioncall.app.CALL_FOREGROUND_STOP"
+    const val ACTION_START = "__APP_PACKAGE__.CALL_FOREGROUND_START"
+    const val ACTION_STOP = "__APP_PACKAGE__.CALL_FOREGROUND_STOP"
     const val EXTRA_TITLE = "title"
     const val EXTRA_BODY = "body"
     private const val CHANNEL_ID = "questioncall_ongoing_call"
@@ -196,7 +202,7 @@ class CallForegroundService : Service() {
 }
 `;
 
-const CALL_DISPATCH_STORE_KT = `package com.questioncall.app
+const CALL_DISPATCH_STORE_KT = `package __APP_PACKAGE__
 
 import android.content.Context
 
@@ -255,7 +261,7 @@ object CallDispatchStore {
 }
 `;
 
-const CALL_NOTIFICATION_SERVICE_KT = `package com.questioncall.app
+const CALL_NOTIFICATION_SERVICE_KT = `package __APP_PACKAGE__
 
 import android.app.Notification
 import android.app.NotificationChannel
@@ -503,7 +509,7 @@ class CallNotificationService : ExpoFirebaseMessagingService() {
 }
 `;
 
-const CALL_FOREGROUND_SERVICE_MODULE_KT = `package com.questioncall.app
+const CALL_FOREGROUND_SERVICE_MODULE_KT = `package __APP_PACKAGE__
 
 import android.app.KeyguardManager
 import android.app.NotificationManager
@@ -745,7 +751,7 @@ class CallForegroundServiceModule(
 }
 `;
 
-const CALL_FOREGROUND_SERVICE_PACKAGE_KT = `package com.questioncall.app
+const CALL_FOREGROUND_SERVICE_PACKAGE_KT = `package __APP_PACKAGE__
 
 import com.facebook.react.ReactPackage
 import com.facebook.react.bridge.NativeModule
@@ -923,28 +929,36 @@ function withCallForegroundSource(config) {
   return withDangerousMod(config, [
     "android",
     (mod) => {
-      const packageDir = path.join(mod.modRequest.projectRoot, ANDROID_PACKAGE_PATH);
+      const pkg = mod.android?.package;
+      if (!pkg) {
+        throw new Error(
+          "withCallKeep: android.package is missing from app.json — the call " +
+            "foreground service sources cannot be generated without it.",
+        );
+      }
+
+      const packageDir = path.join(mod.modRequest.projectRoot, androidPackageDir(pkg));
       fs.mkdirSync(packageDir, { recursive: true });
 
       writeFileIfChanged(
         path.join(packageDir, "CallForegroundService.kt"),
-        CALL_FOREGROUND_SERVICE_KT,
+        applyPackage(CALL_FOREGROUND_SERVICE_KT, pkg),
       );
       writeFileIfChanged(
         path.join(packageDir, "CallForegroundServiceModule.kt"),
-        CALL_FOREGROUND_SERVICE_MODULE_KT,
+        applyPackage(CALL_FOREGROUND_SERVICE_MODULE_KT, pkg),
       );
       writeFileIfChanged(
         path.join(packageDir, "CallForegroundServicePackage.kt"),
-        CALL_FOREGROUND_SERVICE_PACKAGE_KT,
+        applyPackage(CALL_FOREGROUND_SERVICE_PACKAGE_KT, pkg),
       );
       writeFileIfChanged(
         path.join(packageDir, "CallDispatchStore.kt"),
-        CALL_DISPATCH_STORE_KT,
+        applyPackage(CALL_DISPATCH_STORE_KT, pkg),
       );
       writeFileIfChanged(
         path.join(packageDir, "CallNotificationService.kt"),
-        CALL_NOTIFICATION_SERVICE_KT,
+        applyPackage(CALL_NOTIFICATION_SERVICE_KT, pkg),
       );
       patchMainApplication(path.join(packageDir, "MainApplication.kt"));
       patchMainActivity(path.join(packageDir, "MainActivity.kt"));

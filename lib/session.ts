@@ -5,6 +5,7 @@ import { SECURE_STORE_KEYS } from "@/lib/api";
 import { clearAuth } from "@/store/slices/authSlice";
 import { resetPusherClient } from "@/lib/realtime";
 import { clearAdminCache } from "@/lib/admin-cache";
+import { clearAskDraft } from "@/lib/ask-draft";
 import { getCurrentPushToken, unsubscribePushToken } from "@/lib/push-notifications";
 
 /**
@@ -44,6 +45,7 @@ export async function purgeLocalSession(opts?: {
   store.dispatch(resetStore());
   store.dispatch(clearAuth());
   clearAdminCache();
+  clearAskDraft();
   resetPusherClient();
   await persistor.purge();
 }

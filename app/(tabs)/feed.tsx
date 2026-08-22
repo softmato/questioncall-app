@@ -30,6 +30,7 @@ import { useAppDispatch, useAppSelector } from "@/hooks/redux";
 import { useAppTheme } from "@/hooks/use-app-theme";
 import { api, publicApi } from "@/lib/api";
 import { QUESTIONS_FEED_PAGE_SIZE } from "@/lib/feed-config";
+import { questionSummary } from "@/lib/question-summary";
 import { scheduleAnswerDeadlineReminder } from "@/lib/local-notifications";
 import {
   getPusherClient,
@@ -914,7 +915,7 @@ export default function FeedScreen() {
           onImagePress={openImageViewer}
           onReact={(type) => handleReact(questionId, type)}
           onAccept={() => handleAccept(questionId)}
-          onDelete={() => handleDelete(questionId, item.title)}
+          onDelete={() => handleDelete(questionId, questionSummary(item))}
           onCommentTextChange={(text) =>
             setCommentInput((prev) => ({ ...prev, [questionId]: text }))
           }

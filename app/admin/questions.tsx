@@ -16,6 +16,7 @@ import Toast from "react-native-toast-message";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
 import { useAppTheme } from "@/hooks/use-app-theme";
+import { questionSummary } from "@/lib/question-summary";
 import { api } from "@/lib/api";
 import { getRequestErrorMessage } from "@/lib/server-response";
 import { readCache, writeCache } from "@/lib/admin-cache";
@@ -127,7 +128,7 @@ export default function AdminQuestionsScreen() {
               className="flex-1 pr-3 text-[15px] font-semibold text-foreground"
               numberOfLines={2}
             >
-              {item.title}
+              {questionSummary(item)}
             </Text>
             <View
               className="rounded-full px-2 py-0.5"

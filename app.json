@@ -5,12 +5,12 @@
     "version": "1.0.1",
     "orientation": "portrait",
     "icon": "./assets/images/icon.png",
-    "scheme": ["questioncall", "com.questioncall.app"],
+    "scheme": ["questioncall", "com.softmato.questioncall"],
     "userInterfaceStyle": "light",
     "newArchEnabled": true,
     "ios": {
       "supportsTablet": true,
-      "bundleIdentifier": "com.questioncall.app",
+      "bundleIdentifier": "com.softmato.questioncall",
       "infoPlist": {
         "ITSAppUsesNonExemptEncryption": false,
         "NSCameraUsageDescription": "QuestionCall needs camera access for video calls.",
@@ -41,7 +41,7 @@
       ],
       "edgeToEdgeEnabled": true,
       "predictiveBackGestureEnabled": false,
-      "package": "com.questioncall.app",
+      "package": "com.softmato.questioncall",
       "softwareKeyboardLayoutMode": "pan"
     },
     "web": {
@@ -62,6 +62,7 @@
           "backgroundColor": "#ffffff"
         }
       ],
+      "./plugins/withSplashBranding",
       "expo-secure-store",
       "expo-video",
       [
@@ -99,7 +100,8 @@
         }
       ],
       "expo-audio",
-      "./plugins/withStoragePermissionCaps"
+      "./plugins/withStoragePermissionCaps",
+      "@react-native-google-signin/google-signin"
     ],
     "experiments": {
       "typedRoutes": false,

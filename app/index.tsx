@@ -1,9 +1,11 @@
-import { useEffect, useMemo } from "react";
-import { Image, ScrollView, StatusBar, Text, TouchableOpacity, View } from "react-native";
+import { useEffect, useMemo, useState } from "react";
+import { Image, StatusBar, Text, TouchableOpacity, View } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
 import { router } from "expo-router";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
+import { FormulaBackdrop } from "@/components/auth/formula-backdrop";
+import { GoogleContinueButton } from "@/components/auth/google-continue-button";
 import { useAppSelector } from "@/hooks/redux";
 import { useAppTheme } from "@/hooks/use-app-theme";
 
@@ -13,7 +15,8 @@ export default function LandingScreen() {
   const role = useAppSelector((s) => s.user.data?.role);
   const platformConfig = useAppSelector((s) => s.config.data);
   const insets = useSafeAreaInsets();
-  const { statusBarStyle, backgroundColor, iconColor, borderColor } = useAppTheme();
+  const [authError, setAuthError] = useState("");
+  const { statusBarStyle, backgroundColor, iconColor } = useAppTheme();
   const landingDisplayUserCount = useMemo(() => {
     if (typeof platformConfig?.landingDisplayUserCount === "number") {
       return platformConfig.landingDisplayUserCount;
@@ -50,106 +53,73 @@ export default function LandingScreen() {
     <View className="flex-1 bg-background">
       <StatusBar barStyle={statusBarStyle} backgroundColor={backgroundColor} />
 
-      <ScrollView
-        contentContainerStyle={{
-          flexGrow: 1,
-          justifyContent: "space-between",
-          paddingBottom: Math.max(insets.bottom + 28, 44),
-          paddingHorizontal: 24,
-          paddingTop: Math.max(insets.top + 24, 56),
-        }}
-        showsVerticalScrollIndicator={false}
-      >
-        <View className="items-center">
-          <View
-            className="mb-5 max-w-sm flex-row items-center justify-center pb-2"
-            style={{
-              borderBottomWidth: 1,
-              borderBottomColor: borderColor,
-            }}
-          >
-            <Ionicons name="sparkles-outline" size={15} color={iconColor} />
-            <Text className="ml-2 text-[12px] font-bold leading-4 text-foreground">
-              <Text className="font-extrabold">{formattedLandingUserCount}</Text> learners
-              and teachers
-            </Text>
-          </View>
+      {/* Painted first so the mark and the buttons always sit on top of it. */}
+      <FormulaBackdrop topInset={insets.top} />
 
-          <View className="mb-6 h-16 w-16 items-center justify-center rounded-3xl border border-border bg-card shadow-sm">
-            <Image
-              source={require("../assets/images/logo.png")}
-              style={{ width: 42, height: 42 }}
-              resizeMode="contain"
-            />
-          </View>
-          <Text className="text-center text-[34px] font-bold tracking-tight text-foreground">
+      <View
+        className="flex-1 px-7"
+        style={{
+          paddingTop: Math.max(insets.top + 16, 44),
+          paddingBottom: Math.max(insets.bottom + 20, 32),
+        }}
+      >
+        {/* The whole top half is deliberately quiet: a mark, a name, one line
+            of promise. Everything the old screen explained in paragraphs is
+            better learned inside the app than read on the way in. */}
+        <View className="flex-1 items-center justify-center">
+          <Image
+            source={require("../assets/images/logo.png")}
+            style={{ width: 64, height: 64 }}
+            resizeMode="contain"
+          />
+
+          <Text className="mt-7 text-center text-[32px] font-semibold tracking-tight text-foreground">
             QuestionCall
           </Text>
-          <Text className="mt-4 max-w-sm text-center text-[24px] font-bold leading-8 tracking-tight text-foreground">
-            Ask your question. Get a teacher working on them fast.
-          </Text>
-          <Text className="mt-4 max-w-sm text-center text-[15px] leading-6 text-muted-foreground">
-            Students post academic questions, teachers accept them live, and a private
-            answer screen opens right away.
-          </Text>
-          <Text className="mt-3 max-w-sm text-center text-[15px] leading-6 text-muted-foreground">
-            Get help within minutes using chat, audio or video calls, and file sharing
-            while the answer is being solved.
+
+          <Text className="mt-3 max-w-[280px] text-center text-[16px] leading-6 text-muted-foreground">
+            Ask a question. Get a teacher on it in minutes.
           </Text>
         </View>
 
-        <View className="gap-3 pt-8">
-          <TouchableOpacity
-            className="flex-row items-center justify-center gap-2 rounded-full bg-primary py-4 shadow-lg"
-            activeOpacity={0.85}
-            onPress={() =>
-              router.push({
-                pathname: "/(auth)/register",
-                params: { role: "STUDENT" },
-              })
-            }
-          >
-            <Ionicons name="school-outline" size={18} color="#FFFFFF" />
-            <Text className="text-[16px] font-semibold text-primary-foreground">
-              I&apos;m a Student
-            </Text>
-          </TouchableOpacity>
+        <View className="gap-3">
+          {/* One tap to the feed for anyone with a Google account: existing
+              users never see a role screen, new ones get asked once in a
+              sheet on top of this screen rather than on a route of their own. */}
+          <GoogleContinueButton onError={setAuthError} />
 
           <TouchableOpacity
-            className="flex-row items-center justify-center gap-2 rounded-full border border-border bg-card py-4 shadow-sm"
-            activeOpacity={0.85}
-            onPress={() =>
-              router.push({
-                pathname: "/(auth)/register",
-                params: { role: "TEACHER" },
-              })
-            }
-          >
-            <Ionicons name="person-outline" size={18} color={iconColor} />
-            <Text className="text-[16px] font-semibold text-card-foreground">
-              I&apos;m a Teacher
-            </Text>
-          </TouchableOpacity>
-
-          <TouchableOpacity
-            className="items-center justify-center py-2"
+            className="h-14 flex-row items-center justify-center gap-2 rounded-full border border-border bg-card"
             activeOpacity={0.85}
             onPress={() => router.push("/(auth)/login")}
           >
-            <Text className="text-[15px] font-semibold text-foreground">Sign in</Text>
+            <Ionicons name="mail-outline" size={18} color={iconColor} />
+            <Text className="text-[16px] font-semibold text-card-foreground">
+              Continue with Email
+            </Text>
           </TouchableOpacity>
 
-          <Text className="px-2 pt-2 text-center text-[12px] leading-5 text-muted-foreground">
+          {authError ? (
+            <Text className="px-2 text-center text-[13px] leading-5 text-destructive">
+              {authError}
+            </Text>
+          ) : null}
+
+          <Text className="pt-2 text-center text-[11px] leading-4 text-muted-foreground">
+            Joined by {formattedLandingUserCount} learners and teachers
+          </Text>
+
+          <Text className="px-4 text-center text-[11px] leading-4 text-muted-foreground">
             By continuing, you agree to our{" "}
             <Text
-              className="font-bold text-foreground underline"
+              className="font-semibold text-foreground underline"
               onPress={() => router.push("/legal/terms")}
             >
               Terms of Use
             </Text>{" "}
             and{" "}
             <Text
-              className="font-bold text-foreground underline"
+              className="font-semibold text-foreground underline"
               onPress={() => router.push("/legal/privacy")}
             >
               Privacy Policy
@@ -157,7 +127,7 @@ export default function LandingScreen() {
             .
           </Text>
         </View>
-      </ScrollView>
+      </View>
     </View>
   );
 }

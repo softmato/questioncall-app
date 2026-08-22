@@ -620,18 +620,20 @@ export function FeedQuestionCard({
           ) : null}
         </View>
 
-        <Text
-          style={{
-            marginTop: 13,
-            color: FEED_COLORS.text,
-            fontSize: 18,
-            fontWeight: "700",
-            lineHeight: 23.8,
-            letterSpacing: -0.18,
-          }}
-        >
-          {item.title}
-        </Text>
+        {item.title ? (
+          <Text
+            style={{
+              marginTop: 13,
+              color: FEED_COLORS.text,
+              fontSize: 18,
+              fontWeight: "700",
+              lineHeight: 23.8,
+              letterSpacing: -0.18,
+            }}
+          >
+            {item.title}
+          </Text>
+        ) : null}
         {item.body ? (
           <Text
             numberOfLines={3}

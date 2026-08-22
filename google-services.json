@@ -1,21 +1,21 @@
 {
   "project_info": {
-    "project_number": "116367880758",
-    "project_id": "question-call",
-    "storage_bucket": "question-call.firebasestorage.app"
+    "project_number": "77884593631",
+    "project_id": "softmato-questioncall",
+    "storage_bucket": "softmato-questioncall.firebasestorage.app"
   },
   "client": [
     {
       "client_info": {
-        "mobilesdk_app_id": "1:116367880758:android:956e300461aae2c5d61e97",
+        "mobilesdk_app_id": "1:77884593631:android:c488383a608e3cf133a06a",
         "android_client_info": {
-          "package_name": "com.questioncall.app"
+          "package_name": "com.softmato.questioncall"
         }
       },
       "oauth_client": [],
       "api_key": [
         {
-          "current_key": "AIzaSyCKDWwsplqoXFoz3jQ7JcDYxx3vWeC8VdQ"
+          "current_key": "AIzaSyBOHl6Pb0iI424Yd1uwRRx1dFd1MZmEI9w"
         }
       ],
       "services": {

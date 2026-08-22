@@ -53,6 +53,7 @@ import {
 } from "@/lib/full-screen-call-notification";
 import { stopOngoingCallService } from "@/lib/ongoing-call-service";
 
+import { BrandSplash } from "@/components/branding/brand-splash";
 import { GlobalUploadOverlay } from "@/components/sprint2/global-upload-overlay";
 import { PersistentCallHost } from "@/components/calls/persistent-call-host";
 import { CouponInviteHost } from "@/components/subscription/coupon-invite-host";
@@ -449,6 +450,11 @@ function RootLayout() {
                 <CouponInviteHost />
                 <GlobalUploadOverlay />
                 <Toast />
+                {/* Continues the native splash in JS so the "Powered by
+                    Softmato" lockup can sit at the bottom — expo-splash-screen
+                    can only draw one centred image. Last child, so it covers
+                    everything until it fades itself out. */}
+                <BrandSplash />
               </AppInitializer>
             </GestureHandlerRootView>
           </SafeAreaProvider>

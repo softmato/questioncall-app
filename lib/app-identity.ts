@@ -3,7 +3,7 @@ import { Platform } from "react-native";
 
 const expoConfig = Constants.expoConfig;
 
-const FALLBACK_PACKAGE = "com.questioncall.app";
+const FALLBACK_PACKAGE = "com.softmato.questioncall";
 
 export const APP_PACKAGE =
   (Platform.OS === "ios"
@@ -11,39 +11,15 @@ export const APP_PACKAGE =
     : expoConfig?.android?.package) ?? FALLBACK_PACKAGE;
 
 /**
- * Google's OAuth redirect back into the app.
+ * Google Sign-In is native now (`lib/google-signin.ts`), so there is no custom
+ * URI scheme redirect any more — Google rejects those on Android OAuth clients
+ * created after mid-2022 ("Custom URI scheme is not enabled for your Android
+ * client"). The native SDK sends only the WEB client id as `serverClientId`;
+ * the Android clients still have to exist in that same Cloud project so Google
+ * can match the caller's package + signing SHA-1, but the app never names them.
  *
- * The path MUST NOT collide with a real expo-router route. `APP_PACKAGE` is a
- * registered scheme in AndroidManifest, so when Google redirects to
- * `com.questioncall.app:/<path>` Android hands that URL to MainActivity and
- * expo-router's linking handler resolves `<path>` as a navigation target — it
- * races expo-auth-session's listener for the same URL. When the path was
- * `/login`, router won: the screen remounted (wiping the pending auth request
- * and flashing away any error), the id_token was never delivered, and
- * `/mobile/login` was never called. Signing up from the register screen got
- * bounced to the login screen for the same reason.
- *
- * `oauthredirect` is the path Google documents for Android client types and
- * matches no route in `app/`, so only expo-auth-session consumes it. Android
- * OAuth clients authorise by package name + signing SHA-1 rather than by
- * registered redirect URI, so changing this path needs no Google Cloud change.
+ * `APP_PACKAGE` stays exported for the call/deep-link plumbing.
  */
-export const GOOGLE_OAUTH_REDIRECT_URI =
-  Platform.OS === "web" ? undefined : `${APP_PACKAGE}:/oauthredirect`;
-
-const isProductionBuild = !__DEV__;
-
-export const GOOGLE_ANDROID_CLIENT_ID = (
-  isProductionBuild
-    ? process.env.EXPO_PUBLIC_GOOGLE_ANDROID_CLIENT_ID_PROD
-    : process.env.EXPO_PUBLIC_GOOGLE_ANDROID_CLIENT_ID
-)?.trim();
-
-export const GOOGLE_IOS_CLIENT_ID = (
-  isProductionBuild
-    ? process.env.EXPO_PUBLIC_GOOGLE_IOS_CLIENT_ID_PROD
-    : process.env.EXPO_PUBLIC_GOOGLE_IOS_CLIENT_ID
-)?.trim();
 
 export const GOOGLE_WEB_CLIENT_ID = process.env.EXPO_PUBLIC_GOOGLE_WEB_CLIENT_ID?.trim();
 

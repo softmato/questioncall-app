@@ -18,6 +18,8 @@ import {
 import { Ionicons } from "@expo/vector-icons";
 import { router } from "expo-router";
 
+import { questionSummary } from "@/lib/question-summary";
+
 import { useImageViewer } from "@/components/image-viewer/image-viewer-context";
 import Toast from "react-native-toast-message";
 
@@ -206,7 +208,7 @@ function QuestionCard({
         {/* Title + badge */}
         <View className="mb-2.5 flex-row items-start justify-between gap-2">
           <Text className="flex-1 text-[15px] font-semibold leading-snug text-foreground">
-            {item.title}
+            {questionSummary(item)}
           </Text>
           <StatusBadge status={item.status} />
         </View>
