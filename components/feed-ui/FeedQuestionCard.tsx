@@ -1,4 +1,5 @@
 import { Ionicons } from "@expo/vector-icons";
+import * as Haptics from "expo-haptics";
 import { router } from "expo-router";
 import type { ComponentProps } from "react";
 import {
@@ -152,9 +153,19 @@ function ActionStat({
   activeIcon: IoniconName;
   onPress?: () => void;
 }) {
+  // Reactions are optimistic — the icon fills in before the server has heard
+  // about it — so the tap has no other confirmation that it registered. Fire
+  // the haptic here, on the touch itself, rather than in the reaction handler,
+  // so it lands even if the request is slow or later rolls back.
+  const handlePress = () => {
+    if (!onPress) return;
+    void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light).catch(() => {});
+    onPress();
+  };
+
   return (
     <TouchableOpacity
-      onPress={onPress}
+      onPress={handlePress}
       activeOpacity={0.72}
       style={{ flexDirection: "row", alignItems: "center", gap: 6, paddingVertical: 4 }}
     >
@@ -195,7 +206,10 @@ function QuestionImage({
           source={{ uri: first }}
           style={{
             width: "100%",
-            height: 132,
+            // Questions are camera-first, so for a photo-only question this
+            // preview *is* the question — 132 cropped handwriting and textbook
+            // pages down to an unreadable strip.
+            height: 200,
             borderRadius: 14,
             borderWidth: 1,
             borderColor: "rgba(0,0,0,0.06)",

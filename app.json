@@ -1,6 +1,6 @@
 {
   "expo": {
-    "name": "Question Call",
+    "name": "QuestionCall",
     "slug": "qustion-call",
     "version": "1.0.1",
     "orientation": "portrait",
@@ -120,6 +120,6 @@
         "projectId": "86d256ec-943f-49e8-adaf-659400e4edac"
       }
     },
-    "owner": "question-call"
+    "owner": "softmatotechnology"
   }
 }

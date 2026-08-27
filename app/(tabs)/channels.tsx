@@ -1,7 +1,6 @@
 import {
   View,
   Text,
-  FlatList,
   RefreshControl,
   TouchableOpacity,
   ActivityIndicator,
@@ -23,6 +22,8 @@ import {
 } from "@/store/slices/channelsSlice";
 import type { ChannelListItem } from "@/store/slices/channelsSlice";
 import { useAppTheme } from "@/hooks/use-app-theme";
+import { useTabBarScroll } from "@/components/ui/bottom-chrome";
+import Animated from "react-native-reanimated";
 import { api } from "@/lib/api";
 
 // ─── Time formatter ───────────────────────────────────────────
@@ -289,6 +290,7 @@ function Separator({ borderColor }: { borderColor: string }) {
 // ─── Main screen ──────────────────────────────────────────────
 export default function ChannelsScreen() {
   const dispatch = useAppDispatch();
+  const { onScroll, scrollEventThrottle, tabBarClearance } = useTabBarScroll();
   const insets = useSafeAreaInsets();
   const userId = useAppSelector((s) => s.user.data?._id ?? null);
   const { list, isLoading, isRefreshing, lastFetchedAt, loadedForUserId } =
@@ -510,7 +512,7 @@ export default function ChannelsScreen() {
           </Text>
         </View>
       ) : (
-        <FlatList
+        <Animated.FlatList
           data={filteredChannels}
           keyExtractor={(item, index) => `${item.id}-${index}`}
           renderItem={({ item }) => (
@@ -531,7 +533,10 @@ export default function ChannelsScreen() {
               tintColor={primaryColor}
             />
           }
-          contentContainerStyle={{ paddingBottom: 16 }}
+          // The tab bar floats over the list, so the list reserves its height.
+          contentContainerStyle={{ paddingBottom: 16 + tabBarClearance }}
+          onScroll={onScroll}
+          scrollEventThrottle={scrollEventThrottle}
           showsVerticalScrollIndicator={false}
         />
       )}

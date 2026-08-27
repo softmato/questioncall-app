@@ -5,6 +5,8 @@ import {
   Easing,
   FlatList,
   Modal,
+  type NativeScrollEvent,
+  type NativeSyntheticEvent,
   RefreshControl,
   StatusBar,
   StyleSheet,
@@ -26,6 +28,7 @@ import {
 } from "@/components/feed-ui/FeedQuestionCard";
 import { useFeedColors } from "@/components/feed-ui/tokens";
 import { useImageViewer } from "@/components/image-viewer/image-viewer-context";
+import { useTabBarScroll } from "@/components/ui/bottom-chrome";
 import { useAppDispatch, useAppSelector } from "@/hooks/redux";
 import { useAppTheme } from "@/hooks/use-app-theme";
 import { api, publicApi } from "@/lib/api";
@@ -45,6 +48,7 @@ import {
   clearFeedError,
   getFeedQuestionId,
   normalizeFeedQuestion,
+  normalizeFeedQuestionPatch,
   normalizeFeedQuestions,
   prependQuestion,
   removeQuestion,
@@ -230,12 +234,19 @@ export default function FeedScreen() {
 
   // ─── Sticky header: track scroll offset (native-driven for smoothness) ───
   const scrollY = useRef(new RNAnimated.Value(0)).current;
+  // The tab bar hides on scroll from the same events. This screen already owns
+  // its `Animated.event` for the pinned top bar, so the bar is fed through that
+  // event's `listener` slot rather than a second, competing scroll handler.
+  const { onScrollOffset, tabBarClearance } = useTabBarScroll();
   const onScroll = useMemo(
     () =>
       RNAnimated.event([{ nativeEvent: { contentOffset: { y: scrollY } } }], {
         useNativeDriver: true,
+        listener: (event: NativeSyntheticEvent<NativeScrollEvent>) => {
+          onScrollOffset(event.nativeEvent.contentOffset.y);
+        },
       }),
-    [scrollY],
+    [onScrollOffset, scrollY],
   );
   // Bar starts COLLAPSE_DISTANCE px lower, then rises and pins under the status bar.
   const barTranslateY = scrollY.interpolate({
@@ -522,8 +533,13 @@ export default function FeedScreen() {
 
     const handleUpdated = (payload: { question?: unknown }) => {
       if (!payload.question) return;
-      const normalized = normalizeFeedQuestion(payload.question);
-      dispatch(updateQuestion({ id: normalized.id, data: normalized }));
+      // Patch, not a full normalize: question broadcasts are partial, and
+      // merging a filled-in default over an existing card erases whatever the
+      // payload happened to leave out.
+      const id = normalizeFeedQuestion(payload.question).id;
+      dispatch(
+        updateQuestion({ id, data: normalizeFeedQuestionPatch(payload.question) }),
+      );
     };
 
     channel.bind(QUESTION_CREATED_EVENT, handleCreated);
@@ -695,7 +711,10 @@ export default function FeedScreen() {
       try {
         const res = await api.post(`/questions/${questionId}/react`, { type });
         dispatch(
-          updateQuestion({ id: questionId, data: normalizeFeedQuestion(res.data) }),
+          updateQuestion({
+            id: questionId,
+            data: normalizeFeedQuestionPatch(res.data),
+          }),
         );
       } catch {
         dispatch(updateQuestion({ id: questionId, data: targetQuestion }));
@@ -710,7 +729,12 @@ export default function FeedScreen() {
       try {
         const res = await api.post(`/questions/${questionId}/accept`);
         const updated = normalizeFeedQuestion(res.data);
-        dispatch(updateQuestion({ id: questionId, data: updated }));
+        dispatch(
+          updateQuestion({
+            id: questionId,
+            data: normalizeFeedQuestionPatch(res.data),
+          }),
+        );
 
         const timerDeadline = res.data?.timerDeadline;
         const channelId = updated.channelId;
@@ -1177,7 +1201,9 @@ export default function FeedScreen() {
         updateCellsBatchingPeriod={50}
         removeClippedSubviews
         contentContainerStyle={{
-          paddingBottom: 20,
+          // The tab bar floats over the list so that hiding it does not reflow
+          // the rows, which means the list reserves its height here.
+          paddingBottom: 20 + tabBarClearance,
           // Clear the pinned top bar in its initial (lowered) position so the
           // first row of the scrolling header sits right beneath it.
           paddingTop: insets.top + TOP_BAR_HEIGHT + COLLAPSE_DISTANCE,

@@ -1,7 +1,6 @@
 import {
   View,
   Text,
-  FlatList,
   RefreshControl,
   Pressable,
   ActivityIndicator,
@@ -19,6 +18,8 @@ import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { router } from "expo-router";
 import { useAppDispatch, useAppSelector } from "@/hooks/redux";
 import { useAppTheme } from "@/hooks/use-app-theme";
+import { useTabBarScroll } from "@/components/ui/bottom-chrome";
+import Animated from "react-native-reanimated";
 import { api } from "@/lib/api";
 import { store } from "@/store";
 import {
@@ -76,6 +77,7 @@ type Chapter = Course & {
 
 export default function CoursesScreen() {
   const dispatch = useAppDispatch();
+  const { onScroll, scrollEventThrottle, tabBarClearance } = useTabBarScroll();
   const insets = useSafeAreaInsets();
   const { list, isLoading, isRefreshing } = useAppSelector((s) => s.courses);
   const isLoggedIn = !!useAppSelector((s) => s.auth.accessToken);
@@ -1117,23 +1119,26 @@ export default function CoursesScreen() {
           )}
         </View>
       ) : viewMode === "list" ? (
-        <FlatList
+        <Animated.FlatList
           key="course-list"
           data={filtered}
           keyExtractor={(item, index) => getCourseKey(item, index)}
           refreshControl={refreshControl}
+          // The tab bar floats over the list, so the list reserves its height.
           contentContainerStyle={{
             paddingHorizontal: 16,
             paddingTop: 12,
-            paddingBottom: 24,
+            paddingBottom: 24 + tabBarClearance,
           }}
           ListHeaderComponent={chaptersHeader}
           ItemSeparatorComponent={listSeparator}
+          onScroll={onScroll}
+          scrollEventThrottle={scrollEventThrottle}
           showsVerticalScrollIndicator={false}
           renderItem={renderListItem}
         />
       ) : (
-        <FlatList
+        <Animated.FlatList
           key="course-grid"
           data={gridData}
           keyExtractor={(item, index) =>
@@ -1144,10 +1149,12 @@ export default function CoursesScreen() {
           contentContainerStyle={{
             paddingHorizontal: 16,
             paddingTop: 12,
-            paddingBottom: 24,
+            paddingBottom: 24 + tabBarClearance,
           }}
           ListHeaderComponent={chaptersHeader}
           columnWrapperStyle={{ gap: 10, marginBottom: 10 }}
+          onScroll={onScroll}
+          scrollEventThrottle={scrollEventThrottle}
           showsVerticalScrollIndicator={false}
           renderItem={renderGridItem}
         />

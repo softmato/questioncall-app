@@ -33,7 +33,19 @@ function iconForType(type: string): IconName {
     case "QUESTION_RESET":
     case "ANSWER_SUBMITTED":
     case "DEADLINE_WARNING":
+    case "NEW_QUESTION_INTEREST":
       return "help-circle-outline";
+    case "NEW_QUESTION_POSTED":
+      return "add-circle-outline";
+    case "REACTION_RECEIVED":
+      return "heart-outline";
+    case "COMMENT_RECEIVED":
+    case "CHAT_MESSAGE":
+      return "chatbubble-ellipses-outline";
+    case "PROFILE_VIEWED":
+      return "eye-outline";
+    case "NEW_FOLLOWER":
+      return "person-add-outline";
     case "CHANNEL_CLOSED":
     case "CHANNEL_EXPIRED":
       return "chatbubble-outline";

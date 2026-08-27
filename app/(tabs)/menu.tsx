@@ -1,7 +1,6 @@
 import {
   View,
   Text,
-  ScrollView,
   TouchableOpacity,
   Pressable,
   Platform,
@@ -14,6 +13,8 @@ import { router } from "expo-router";
 import { useAppSelector } from "@/hooks/redux";
 import { purgeLocalSession } from "@/lib/session";
 import { useAppTheme } from "@/hooks/use-app-theme";
+import { useTabBarScroll } from "@/components/ui/bottom-chrome";
+import Animated from "react-native-reanimated";
 import { PlanBadge } from "@/components/PlanBadge";
 import type { ComponentProps } from "react";
 
@@ -97,6 +98,7 @@ function Divider() {
 
 export default function MenuScreen() {
   const user = useAppSelector((s) => s.user.data);
+  const { onScroll, scrollEventThrottle, tabBarClearance } = useTabBarScroll();
   const config = useAppSelector((s) => s.config.data);
   const unreadNotificationCount = useAppSelector((s) => s.notifications.unreadCount);
   const { statusBarStyle, backgroundColor, cardColor, primaryColor, primarySoftColor } =
@@ -131,10 +133,13 @@ export default function MenuScreen() {
         <Text className="text-[28px] font-bold tracking-tight text-foreground">Menu</Text>
       </View>
 
-      <ScrollView
+      <Animated.ScrollView
         showsVerticalScrollIndicator={false}
         className="flex-1"
-        contentContainerStyle={{ paddingBottom: 28 }}
+        // The tab bar floats over the content, so the page reserves its height.
+        contentContainerStyle={{ paddingBottom: 28 + tabBarClearance }}
+        onScroll={onScroll}
+        scrollEventThrottle={scrollEventThrottle}
       >
         {/* ── Combined Profile + Points card (cut-corner style) ─── */}
         <View className="mx-4 my-3">
@@ -444,7 +449,7 @@ export default function MenuScreen() {
             danger
           />
         </View>
-      </ScrollView>
+      </Animated.ScrollView>
     </View>
   );
 }

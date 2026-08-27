@@ -1,17 +1,25 @@
 import { Tabs, usePathname, router } from "expo-router";
 import { Ionicons } from "@expo/vector-icons";
-import { View, Text, TouchableOpacity, Platform } from "react-native";
-import { useSafeAreaInsets } from "react-native-safe-area-context";
+import { View, Text, TouchableOpacity } from "react-native";
 import { useCallback, useEffect } from "react";
 import { Gesture, GestureDetector } from "react-native-gesture-handler";
 import Animated, {
   runOnJS,
+  type SharedValue,
   useAnimatedStyle,
   useSharedValue,
   withSpring,
 } from "react-native-reanimated";
 import { useAppSelector } from "@/hooks/redux";
 import { useAppTheme } from "@/hooks/use-app-theme";
+import { AskFab } from "@/components/ui/ask-fab";
+import {
+  BottomChromeProvider,
+  CENTER_BUTTON_RAISE,
+  TAB_BAR_HEIGHT,
+  useBottomChrome,
+  useTabBarMetrics,
+} from "@/components/ui/bottom-chrome";
 import type { BottomTabBarProps } from "@react-navigation/bottom-tabs";
 import type { ComponentProps } from "react";
 
@@ -23,40 +31,56 @@ const SWIPE_VEL = 400;
 type IoniconName = ComponentProps<typeof Ionicons>["name"];
 
 // ─── Center floating button ────────────────────────────────────
+// Shrinks and fades as the bar leaves, rather than just riding it down: the
+// floating pill is aimed at this button's resting spot, and the handoff only
+// reads as one control moving if this end of it collapses as the other grows.
 function CenterTabButton({
   children,
   onPress,
   backgroundColor,
   borderColor,
+  progress,
 }: {
   children: React.ReactNode;
   onPress?: () => void;
   backgroundColor: string;
   borderColor: string;
+  progress?: SharedValue<number>;
 }) {
+  const handoffStyle = useAnimatedStyle(() => {
+    const value = progress?.value ?? 0;
+
+    return {
+      opacity: 1 - value,
+      transform: [{ scale: 1 - value * 0.55 }],
+    };
+  });
+
   return (
-    <TouchableOpacity
-      onPress={onPress}
-      activeOpacity={0.85}
-      style={{
-        top: -16,
-        alignItems: "center",
-        justifyContent: "center",
-        width: 64,
-        height: 64,
-        borderRadius: 32,
-        borderWidth: 1,
-        borderColor,
-        backgroundColor,
-        shadowColor: backgroundColor,
-        shadowOffset: { width: 0, height: 4 },
-        shadowOpacity: 0.32,
-        shadowRadius: 8,
-        elevation: 8,
-      }}
-    >
-      {children}
-    </TouchableOpacity>
+    <Animated.View style={handoffStyle}>
+      <TouchableOpacity
+        onPress={onPress}
+        activeOpacity={0.85}
+        style={{
+          top: -CENTER_BUTTON_RAISE,
+          alignItems: "center",
+          justifyContent: "center",
+          width: 64,
+          height: 64,
+          borderRadius: 32,
+          borderWidth: 1,
+          borderColor,
+          backgroundColor,
+          shadowColor: backgroundColor,
+          shadowOffset: { width: 0, height: 4 },
+          shadowOpacity: 0.32,
+          shadowRadius: 8,
+          elevation: 8,
+        }}
+      >
+        {children}
+      </TouchableOpacity>
+    </Animated.View>
   );
 }
 
@@ -147,7 +171,8 @@ function CustomTabBar({
   isDark,
   bottomPadding,
   totalUnread,
-  isTeacher,
+  centerLabel,
+  progress,
 }: BottomTabBarProps & {
   primaryColor: string;
   cardColor: string;
@@ -156,10 +181,10 @@ function CustomTabBar({
   isDark: boolean;
   bottomPadding: number;
   totalUnread: number;
-  isTeacher: boolean;
+  centerLabel: string;
+  progress?: SharedValue<number>;
 }) {
   const inactiveColor = isDark ? "#A8A29E" : mutedIconColor;
-  const centerLabel = isTeacher ? "Actions" : "Ask";
 
   return (
     <View
@@ -169,7 +194,7 @@ function CustomTabBar({
         backgroundColor: cardColor,
         borderTopColor: borderColor,
         borderTopWidth: 1,
-        height: 56 + bottomPadding,
+        height: TAB_BAR_HEIGHT + bottomPadding,
         paddingBottom: bottomPadding,
         paddingTop: 8,
       }}
@@ -219,6 +244,7 @@ function CustomTabBar({
                 onPress={() => router.push("/ask")}
                 backgroundColor={primaryColor}
                 borderColor={borderColor}
+                progress={progress}
               >
                 <View style={{ alignItems: "center", justifyContent: "center" }}>
                   <Ionicons name="add" size={27} color="#FFFFFF" />
@@ -238,14 +264,41 @@ function CustomTabBar({
 
 // ─── Tabs layout ───────────────────────────────────────────────
 export default function TabsLayout() {
+  // The provider has to sit above `<Tabs>` so every tab screen can feed it
+  // scroll offsets, which is why the shell below is a separate component: a
+  // component cannot consume the context it renders.
+  return (
+    <BottomChromeProvider>
+      <TabsShell />
+    </BottomChromeProvider>
+  );
+}
+
+function TabsShell() {
   const userRole = useAppSelector((s) => s.user.data?.role);
   const totalUnread = useAppSelector((s) =>
     s.channels.list.reduce((count, ch) => count + (ch.unreadCount > 0 ? 1 : 0), 0),
   );
-  const insets = useSafeAreaInsets();
   const { cardColor, borderColor, primaryColor, mutedIconColor, isDark } = useAppTheme();
   const isTeacher = userRole === "TEACHER";
-  const bottomPadding = Math.max(insets.bottom, Platform.OS === "ios" ? 20 : 10);
+  const centerLabel = isTeacher ? "Actions" : "Ask";
+  const { bottomPadding, height: tabBarHeight } = useTabBarMetrics();
+
+  // ─── Hide on scroll ────────────────────────────────────────
+  const chrome = useBottomChrome();
+  const progress = chrome?.progress;
+
+  const hideStyle = useAnimatedStyle(() => {
+    const value = progress?.value ?? 0;
+
+    return {
+      // Fades slightly ahead of the slide, so the bar reads as leaving rather
+      // than as being clipped by the screen edge.
+      opacity: 1 - value * 0.6,
+      // Slid by its full height, inset included, so nothing peeks out.
+      transform: [{ translateY: value * tabBarHeight }],
+    };
+  });
 
   // ─── Swipe gesture ─────────────────────────────────────────
   const pathname = usePathname();
@@ -314,18 +367,61 @@ export default function TabsLayout() {
       <Animated.View style={swipeStyle}>
         <Tabs
           tabBar={(props) => (
-            <Animated.View style={counterStyle}>
-              <CustomTabBar
-                {...props}
-                primaryColor={primaryColor}
-                cardColor={cardColor}
-                borderColor={borderColor}
-                mutedIconColor={mutedIconColor}
-                isDark={isDark}
-                bottomPadding={bottomPadding}
-                totalUnread={totalUnread}
-                isTeacher={isTeacher}
-              />
+            /*
+             * Absolutely positioned, so the bar floats over the screens instead
+             * of occupying a row of the navigator's column. Sliding it away must
+             * not reflow the list underneath — otherwise every hide and show
+             * would shift the text the reader is looking at. Screens reserve the
+             * height themselves, via `tabBarClearance`.
+             *
+             * `box-none` so the strip the bar vacates hands its touches back to
+             * the content behind it.
+             */
+            <Animated.View
+              pointerEvents="box-none"
+              style={[
+                {
+                  position: "absolute",
+                  left: 0,
+                  right: 0,
+                  bottom: 0,
+                  /*
+                   * Tall enough to contain the center button's raise. Android
+                   * does not deliver touches to a child drawn outside its
+                   * parent's bounds, so a slot sized to the bar alone would
+                   * make the top of the raised Ask button untappable.
+                   */
+                  height: TAB_BAR_HEIGHT + bottomPadding + CENTER_BUTTON_RAISE,
+                },
+                counterStyle,
+              ]}
+            >
+              <Animated.View
+                style={[
+                  { position: "absolute", left: 0, right: 0, bottom: 0 },
+                  hideStyle,
+                ]}
+              >
+                <CustomTabBar
+                  {...props}
+                  primaryColor={primaryColor}
+                  cardColor={cardColor}
+                  borderColor={borderColor}
+                  mutedIconColor={mutedIconColor}
+                  isDark={isDark}
+                  bottomPadding={bottomPadding}
+                  totalUnread={totalUnread}
+                  centerLabel={centerLabel}
+                  progress={progress}
+                />
+              </Animated.View>
+
+              {/*
+                Grows out of the center button as the bar leaves, and shrinks
+                back into it as the bar returns. A sibling of the sliding bar
+                rather than a child, so it can hold still while the bar moves.
+              */}
+              <AskFab label={centerLabel} />
             </Animated.View>
           )}
           screenOptions={{

@@ -155,6 +155,37 @@ export function normalizeFeedQuestion(raw: unknown): FeedQuestion {
   };
 }
 
+/**
+ * Normalize an *update* payload into a patch carrying only the keys the server
+ * actually sent.
+ *
+ * `normalizeFeedQuestion` always returns a complete FeedQuestion, filling
+ * anything absent with a default — `images` becomes `[]`, counts become `0`.
+ * That is correct for a fresh question, and destructive for an update: the
+ * `updateQuestion` reducer shallow-merges, so a payload that simply didn't
+ * mention `images` would erase the photo from a card that had one. Several
+ * question broadcasts (react, accept, close, expire) omit fields precisely
+ * because `FeedQuestion` marks them optional, so this is not hypothetical —
+ * reacting to a photo-only question used to blank its photo until the next
+ * feed refetch.
+ *
+ * Keying off the raw payload keeps "field absent" and "field explicitly
+ * cleared" distinct, which is the only way a shallow merge is safe.
+ */
+export function normalizeFeedQuestionPatch(raw: unknown): Partial<FeedQuestion> {
+  const data = raw && typeof raw === "object" ? (raw as Record<string, unknown>) : {};
+  const normalized = normalizeFeedQuestion(raw) as Record<string, unknown>;
+  const patch: Record<string, unknown> = {};
+
+  for (const key of Object.keys(normalized)) {
+    if (key in data) {
+      patch[key] = normalized[key];
+    }
+  }
+
+  return patch as Partial<FeedQuestion>;
+}
+
 export function normalizeFeedQuestions(rawQuestions: unknown) {
   if (!Array.isArray(rawQuestions)) {
     return [];
