@@ -11,14 +11,43 @@
 // already active — so the overlay feels stuck. Guarding on an active-call set
 // stops the duplicate surface from ever appearing.
 
+import { NativeModules, Platform } from "react-native";
+
 const activeCallSessions = new Set<string>();
 
+type CallStateNativeModule = {
+  setCallActive?: (callSessionId: string, active: boolean) => void;
+};
+
+/**
+ * Mirror the set into the native store so CallNotificationService can see it.
+ *
+ * This set alone is not enough. It lives in JS memory, and the FCM service that
+ * can also raise a call runs with no JS at all — so a ring-fallback push that
+ * lost the race with an answer rang ON TOP of a live call, on a device that had
+ * already been connected for several seconds. The native guard reads the
+ * mirrored flag out of SharedPreferences instead.
+ */
+function mirrorToNative(callSessionId: string, active: boolean): void {
+  if (Platform.OS !== "android") return;
+  const native = NativeModules.CallForegroundService as CallStateNativeModule | undefined;
+  try {
+    native?.setCallActive?.(callSessionId, active);
+  } catch {
+    // Older binary without the method — the JS guard still covers app-alive.
+  }
+}
+
 export function markCallActive(callSessionId: string): void {
-  if (callSessionId) activeCallSessions.add(callSessionId);
+  if (!callSessionId) return;
+  activeCallSessions.add(callSessionId);
+  mirrorToNative(callSessionId, true);
 }
 
 export function clearActiveCall(callSessionId: string): void {
-  if (callSessionId) activeCallSessions.delete(callSessionId);
+  if (!callSessionId) return;
+  activeCallSessions.delete(callSessionId);
+  mirrorToNative(callSessionId, false);
 }
 
 export function isCallActive(callSessionId: string): boolean {

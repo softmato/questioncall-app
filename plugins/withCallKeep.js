@@ -258,6 +258,164 @@ object CallDispatchStore {
       .remove(callSessionId)
       .apply()
   }
+
+  // ── Call state, deliberately in a SECOND prefs file ──────────────────────
+  //
+  // Not PREFS_NAME: claim() evicts every Long in its file older than WINDOW_MS,
+  // so an "I am in this call" marker parked there would vanish 30s into a call
+  // and the guard it exists for would silently stop working.
+  //
+  // What this is for: lib/call-dispatch.ts has always refused to resurface a
+  // call the user is already inside (isCallActive), but that set is in JS
+  // memory and CallNotificationService cannot see it. The native path had no
+  // equivalent, so a ring-fallback push that lost the race with an answer rang
+  // ON TOP of the live call. Mirroring the flag here closes that.
+
+  // ── Pending accept ───────────────────────────────────────────────────────
+  //
+  // The user pressing Accept is a decision, and until now it was only ever an
+  // *event*: the notification's PendingIntent launched MainActivity and the
+  // library emitted RNNotificationAnswerAction over the React bridge. Both
+  // assume JS is already running. On a cold start it is not — the process is
+  // being created by that very tap — so the answer was emitted into a bridge
+  // with no listeners and simply lost. The app came up on whatever screen it
+  // was last on, the server was never told anyone answered, and the call died
+  // as "Cancelled" while the user sat there looking at their chat list.
+  //
+  // So write the decision down instead. MainActivity records it straight from
+  // the launch intent, before a line of JS exists, and JS drains it on boot.
+  // A tap can no longer be lost to a race with the bundle loader.
+
+  private const val PENDING_ACCEPT_PREFS = "questioncall_pending_accept"
+  private const val PENDING_CALL_ID = "callId"
+  private const val PENDING_MODE = "mode"
+  private const val PENDING_AT = "at"
+  // Older than this and the tap cannot honestly be called "the user is waiting
+  // for this call to connect" — better to drop it than to drag someone into a
+  // call they pressed Accept on minutes ago.
+  private const val PENDING_ACCEPT_TTL_MS = 60_000L
+
+  @Synchronized
+  @JvmStatic
+  fun recordPendingAccept(context: Context, callSessionId: String, mode: String?) {
+    if (callSessionId.isEmpty()) return
+    context
+      .getSharedPreferences(PENDING_ACCEPT_PREFS, Context.MODE_PRIVATE)
+      .edit()
+      .putString(PENDING_CALL_ID, callSessionId)
+      .putString(PENDING_MODE, mode ?: "")
+      .putLong(PENDING_AT, System.currentTimeMillis())
+      .apply()
+  }
+
+  /**
+   * Read and clear the pending accept. Returns null when there is none, or when
+   * the one on disk is too old to act on.
+   *
+   * Clearing on read is deliberate: this must fire exactly once, and a JS reload
+   * (fast refresh, an error-boundary remount) would otherwise replay a stale
+   * accept and pull the user into a finished call.
+   */
+  @Synchronized
+  @JvmStatic
+  fun consumePendingAccept(context: Context): Pair<String, String>? {
+    val prefs = context.getSharedPreferences(PENDING_ACCEPT_PREFS, Context.MODE_PRIVATE)
+    val callId = prefs.getString(PENDING_CALL_ID, null)
+    val mode = prefs.getString(PENDING_MODE, "") ?: ""
+    val at = prefs.getLong(PENDING_AT, 0L)
+    prefs.edit().clear().apply()
+
+    if (callId.isNullOrEmpty()) return null
+    val age = System.currentTimeMillis() - at
+    if (at == 0L || age < 0 || age > PENDING_ACCEPT_TTL_MS) return null
+    return Pair(callId, mode)
+  }
+
+  @Synchronized
+  @JvmStatic
+  fun clearPendingAccept(context: Context) {
+    context
+      .getSharedPreferences(PENDING_ACCEPT_PREFS, Context.MODE_PRIVATE)
+      .edit()
+      .clear()
+      .apply()
+  }
+
+  private const val STATE_PREFS_NAME = "questioncall_call_state"
+  private const val ACTIVE_KEY_PREFIX = "active."
+  private const val DECLINED_KEY_PREFIX = "declined."
+  // Comfortably longer than the 30s ring window, short enough that a session id
+  // can never be muted for a meaningful length of time by a stale entry.
+  private const val DECLINED_WINDOW_MS = 300_000L
+  // An active marker is normally cleared when the call screen unmounts, so it
+  // has no expiry of its own — a call must stay guarded for its whole length,
+  // however long that is. But if the app is killed mid-call that cleanup never
+  // runs, so sweep anything old enough that it cannot be a live call. A stale
+  // marker only mutes its own dead session; the reason to bound it is to stop
+  // this file growing for ever.
+  private const val ACTIVE_STALE_MS = 21_600_000L
+
+  private fun statePrefs(context: Context) =
+    context.getSharedPreferences(STATE_PREFS_NAME, Context.MODE_PRIVATE)
+
+  @Synchronized
+  @JvmStatic
+  fun setActive(context: Context, callSessionId: String, active: Boolean) {
+    if (callSessionId.isEmpty()) return
+    val prefs = statePrefs(context)
+    val now = System.currentTimeMillis()
+    val editor = prefs.edit()
+    if (active) {
+      editor.putLong(ACTIVE_KEY_PREFIX + callSessionId, now)
+      // The user is demonstrably in the call, so the "they pressed Accept" note
+      // has done its job. Dropping it here stops a cold start inside the TTL
+      // from replaying an accept for a call that is already answered, or since
+      // over — the app would otherwise reopen straight into a dead session.
+      clearPendingAccept(context)
+    } else {
+      editor.remove(ACTIVE_KEY_PREFIX + callSessionId)
+    }
+    for ((key, value) in prefs.all) {
+      if (!key.startsWith(ACTIVE_KEY_PREFIX)) continue
+      val ts = value as? Long ?: continue
+      if (now - ts > ACTIVE_STALE_MS) editor.remove(key)
+    }
+    editor.apply()
+  }
+
+  @Synchronized
+  @JvmStatic
+  fun isActive(context: Context, callSessionId: String): Boolean {
+    if (callSessionId.isEmpty()) return false
+    return statePrefs(context).contains(ACTIVE_KEY_PREFIX + callSessionId)
+  }
+
+  @Synchronized
+  @JvmStatic
+  fun markDeclined(context: Context, callSessionId: String) {
+    if (callSessionId.isEmpty()) return
+    val now = System.currentTimeMillis()
+    val editor = statePrefs(context).edit()
+    editor.putLong(DECLINED_KEY_PREFIX + callSessionId, now)
+    // Only declined markers expire; an active marker is cleared explicitly when
+    // the call ends, because a long call must stay guarded for its whole life.
+    for ((key, value) in statePrefs(context).all) {
+      if (!key.startsWith(DECLINED_KEY_PREFIX)) continue
+      val ts = value as? Long ?: continue
+      if (now - ts > DECLINED_WINDOW_MS) editor.remove(key)
+    }
+    editor.apply()
+  }
+
+  @Synchronized
+  @JvmStatic
+  fun isDeclined(context: Context, callSessionId: String): Boolean {
+    if (callSessionId.isEmpty()) return false
+    val ts = statePrefs(context).getLong(DECLINED_KEY_PREFIX + callSessionId, 0L)
+    if (ts == 0L) return false
+    val elapsed = System.currentTimeMillis() - ts
+    return elapsed in 0 until DECLINED_WINDOW_MS
+  }
 }
 `;
 
@@ -268,10 +426,13 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.Intent
+import android.media.AudioAttributes
 import android.net.Uri
 import android.os.Build
 import android.util.Log
 import androidx.core.app.NotificationCompat
+import androidx.core.app.Person
+import androidx.core.content.ContextCompat
 import com.google.firebase.messaging.RemoteMessage
 import com.reactnativefullscreennotificationincomingcall.Constants
 import com.reactnativefullscreennotificationincomingcall.IncomingCallService
@@ -316,13 +477,94 @@ class CallNotificationService : ExpoFirebaseMessagingService() {
     // Separate from CHANNEL_ID: that one belongs to IncomingCallService and is
     // created with its own settings, which we must not fight over.
     private const val FALLBACK_CHANNEL_ID = "incoming_calls_fallback"
+
+    // Replaces FALLBACK_CHANNEL_ID. A channel's sound, importance and vibration
+    // are frozen the moment it is first created, and that one shipped with no
+    // sound at all — so every call that fell back to it rang with the stock
+    // notification blip for about three seconds and read as "just another
+    // notification". Fixing it needs a NEW id, not an edit; the old channel is
+    // deleted on sight so nobody is left with two "Incoming Calls" rows in
+    // system settings.
+    private const val RING_CHANNEL_ID = "incoming_calls_ring"
+
+    const val ACTION_DECLINE = "__APP_PACKAGE__.CALL_DECLINE"
+    const val EXTRA_CALL_ID = "questioncall.callId"
+    const val EXTRA_DECLINE_TOKEN = "questioncall.declineToken"
+    const val EXTRA_DECLINE_URL = "questioncall.declineUrl"
+
+    /**
+     * Stable per-call notification id. Shared with CallActionReceiver (clears it
+     * on Decline) and CallForegroundServiceModule (clears it once JS has the
+     * call on screen), so all three agree on which notification is which.
+     */
+    @JvmStatic
+    fun notificationId(callId: String): Int = callId.hashCode()
   }
 
   private data class IncomingCall(
     val id: String,
     val callerName: String,
     val isVideo: Boolean,
+    /**
+     * Single-purpose, server-minted, short-lived proof that the holder is this
+     * call's callee, so Decline can reach the API from a process that has no
+     * credentials and no way to read the ones JS holds. Scoped to one call id
+     * and good for nothing else. Null on a push from an older server.
+     */
+    val declineToken: String?,
+    /** Absolute endpoint the token is good for, supplied by the same push. */
+    val declineUrl: String?,
   )
+
+  /**
+   * Firebase draws a push that carries a "notification" payload itself, and
+   * when the app is backgrounded or killed it does so WITHOUT ever calling
+   * onMessageReceived. The server's ring-fallback tier
+   * (web/app/api/calls/create/route.ts) is deliberately one of those, because
+   * on OEMs that refuse to start our process for a data-only message it is the
+   * only thing that arrives at all.
+   *
+   * Left to Firebase it draws a flat line of text: no Accept, no Decline, and
+   * whatever sound the channel happens to carry. handleIntent is the one hook
+   * that runs BEFORE Firebase decides to draw, so claim call payloads here and
+   * put them through the same path a data-only push takes. Anything that is not
+   * a call goes straight back to Firebase, untouched.
+   *
+   * This is also what stops the two tiers stacking: a fallback push for a call
+   * the primary already surfaced now reaches CallDispatchStore.claim() and is
+   * dropped, instead of landing as a second, worse-looking entry next to a ring
+   * that is already going.
+   */
+  override fun handleIntent(intent: Intent) {
+    val call = try {
+      intent.extras?.let { parseCall(RemoteMessage(it)) }
+    } catch (err: Exception) {
+      Log.w(TAG, "handleIntent: could not inspect payload; deferring to Firebase", err)
+      null
+    }
+
+    if (call == null) {
+      super.handleIntent(intent)
+      return
+    }
+
+    Log.d(TAG, "handleIntent intercepted call " + call.id)
+    val surfaced = try {
+      dispatchCall(call)
+    } catch (err: Exception) {
+      Log.e(TAG, "handleIntent dispatch failed", err)
+      false
+    }
+
+    // Interception is only ever an UPGRADE. If we could not put anything in
+    // front of the user, hand the message back so Firebase draws its plain
+    // version — which is what this tier did before, and is still far better
+    // than a call that arrives as nothing at all.
+    if (!surfaced) {
+      Log.w(TAG, "Nothing surfaced for call " + call.id + "; deferring to Firebase")
+      super.handleIntent(intent)
+    }
+  }
 
   override fun onMessageReceived(remoteMessage: RemoteMessage) {
     // Deliberately noisy: this single line is how you tell "the service never
@@ -344,6 +586,54 @@ class CallNotificationService : ExpoFirebaseMessagingService() {
       return
     }
 
+    dispatchCall(call)
+  }
+
+  /**
+   * Surface one incoming call, whichever transport carried it.
+   *
+   * Order matters. The full-screen ringing service is tried FIRST because it is
+   * the best surface by a wide margin: screen on, over the lock screen, looping
+   * ringtone. But it is a FOREGROUND SERVICE, and starting one from the
+   * background is the most restricted thing an app can do on Android 12+ and on
+   * OEM builds generally. When that start is refused we no longer settle for a
+   * line of text — posting a notification needs no background-start allowance
+   * at all, so a CallStyle notification still puts the caller's name, Accept
+   * and Decline in front of the user.
+   *
+   * Returns false only when the call reached the user through NOTHING — not
+   * even the notification. handleIntent uses that to fall back to Firebase's
+   * own rendering rather than leave a call completely silent. A call that was
+   * deliberately suppressed as a duplicate counts as handled, not as a failure.
+   */
+  private fun dispatchCall(call: IncomingCall): Boolean {
+    // Guards that must run BEFORE the claim, because both mean "handled" rather
+    // than "first to arrive" — claiming here would burn the id for a transport
+    // that legitimately needs it later.
+    //
+    // Already inside this call: the JS funnel (lib/call-dispatch.ts) has always
+    // refused to resurface one, but its set lives in JS memory and this service
+    // often runs with no JS at all. Without the mirror in CallDispatchStore a
+    // ring-fallback push that lost the race with an answer rings on top of the
+    // live call — reported from a real session where both sides were connected
+    // and the callee's phone started ringing for the call it was already in.
+    try {
+      if (CallDispatchStore.isActive(applicationContext, call.id)) {
+        Log.d(TAG, "Call " + call.id + " is already active on this device; staying quiet")
+        return true
+      }
+      // Just declined here. The reject POST may still be in flight, or may have
+      // failed outright, so the session can legitimately still be RINGING when
+      // the fallback tier re-sends. Ringing again would undo the user's answer.
+      if (CallDispatchStore.isDeclined(applicationContext, call.id)) {
+        Log.d(TAG, "Call " + call.id + " was declined on this device; staying quiet")
+        return true
+      }
+    } catch (err: Exception) {
+      // A broken state store must never mute a call — fall through and ring.
+      Log.w(TAG, "Call state store failed; continuing", err)
+    }
+
     val claimed = try {
       CallDispatchStore.claim(applicationContext, call.id)
     } catch (err: Exception) {
@@ -354,32 +644,32 @@ class CallNotificationService : ExpoFirebaseMessagingService() {
     }
     if (!claimed) {
       Log.d(TAG, "Call " + call.id + " already surfaced elsewhere; staying quiet")
-      return
+      return true
     }
 
     try {
       showIncomingCall(call)
+      return true
     } catch (err: Exception) {
-      // Most likely a refused background foreground-service start. Fall back to
-      // a plain notification we build ourselves.
+      // Most likely a refused background foreground-service start.
       //
       // NOT super.onMessageReceived(): Expo renders from the top-level
-      // data["title"]/data["message"] keys, which a data-only call push does
-      // not carry, so delegating here produces nothing at all and the call
-      // vanishes silently. A notification without the full-screen ring is a bad
-      // outcome; no notification whatsoever is a much worse one.
-      Log.w(TAG, "Full-screen call UI failed; posting fallback notification", err)
+      // data title/message keys, which a data-only call push does not carry, so
+      // delegating here produces nothing at all and the call vanishes silently.
+      Log.w(TAG, "Full-screen ring unavailable; posting CallStyle notification", err)
       try {
-        showFallbackNotification(call)
+        showCallStyleNotification(call)
+        return true
       } catch (fallbackErr: Exception) {
-        Log.e(TAG, "Fallback notification failed too; call is lost", fallbackErr)
+        Log.e(TAG, "CallStyle notification failed too", fallbackErr)
         try {
-          // Release the claim so the Pusher path can still surface this call if
-          // the app happens to come back within the dedupe window.
+          // Release the claim so the Pusher path — or the server's ring-fallback
+          // tier a few seconds later — can still surface this call.
           CallDispatchStore.forget(applicationContext, call.id)
         } catch (_: Exception) {
           // Best effort.
         }
+        return false
       }
     }
   }
@@ -409,7 +699,13 @@ class CallNotificationService : ExpoFirebaseMessagingService() {
 
     val mode = body?.optString("mode")?.takeIf { it.isNotEmpty() } ?: data["mode"]
 
-    return IncomingCall(id, callerName, mode == "VIDEO")
+    val declineToken = body?.optString("declineToken")?.takeIf { it.isNotEmpty() }
+      ?: data["declineToken"]?.takeIf { it.isNotEmpty() }
+
+    val declineUrl = body?.optString("declineUrl")?.takeIf { it.isNotEmpty() }
+      ?: data["declineUrl"]?.takeIf { it.isNotEmpty() }
+
+    return IncomingCall(id, callerName, mode == "VIDEO", declineToken, declineUrl)
   }
 
   /**
@@ -449,62 +745,360 @@ class CallNotificationService : ExpoFirebaseMessagingService() {
   }
 
   /**
-   * Last-resort visible surface for an incoming call.
+   * The surface an incoming call gets when the full-screen ringing service
+   * cannot be started.
    *
-   * Posting a notification needs no background-start allowance, so this works
-   * in situations where starting IncomingCallService is refused outright. It
-   * still asks for a full-screen intent — if the grant is there the system will
-   * honour it and the call rings properly anyway; if not, it degrades to a
-   * heads-up notification the user can still tap to answer.
+   * This used to be a bare notification — title, text, tap to answer — and on
+   * any device that refuses a background foreground-service start (which is
+   * most of them, once the app has been killed) it was ALL a call ever got.
+   * CallStyle is the fix: the same boxed caller row with Answer and Decline
+   * that the ringing service draws, except NotificationManager.notify() needs
+   * no background-start allowance, so it cannot be refused the way the service
+   * can.
+   *
+   * Two things keep it in call form instead of degrading to an ordinary
+   * notification: the full-screen intent — Android requires a CallStyle
+   * notification to have one or to belong to a foreground service, and we have
+   * no service here, which is the entire reason this path exists — and the
+   * dedicated ring channel carrying the real ringtone. If the Android 14
+   * USE_FULL_SCREEN_INTENT grant is missing the system quietly drops it to a
+   * heads-up banner, which still carries both buttons and still rings.
    */
-  private fun showFallbackNotification(call: IncomingCall) {
+  private fun showCallStyleNotification(call: IncomingCall) {
     val manager =
       applicationContext.getSystemService(NotificationManager::class.java) ?: return
 
-    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-      val channel = NotificationChannel(
-        FALLBACK_CHANNEL_ID,
-        "Incoming Calls",
-        NotificationManager.IMPORTANCE_HIGH,
-      ).apply {
-        description = "Incoming QuestionCall calls."
-        enableVibration(true)
-        vibrationPattern = longArrayOf(0, 1000, 800, 1000)
-        lockscreenVisibility = Notification.VISIBILITY_PUBLIC
-      }
-      manager.createNotificationChannel(channel)
-    }
+    ensureRingChannel(manager)
 
-    // Same deep link the patched notification handlers use on a cold start, so
-    // tapping this lands on the call screen, which auto-accepts for the callee.
-    val deepLink = Intent(
-      Intent.ACTION_VIEW,
-      Uri.parse("questioncall://call/" + call.id),
-    ).apply {
-      addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
-    }
-    val pendingIntent = PendingIntent.getActivity(
-      applicationContext,
-      call.id.hashCode(),
-      deepLink,
-      PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
-    )
+    // Tapping the body and pressing Answer both land on the call screen, which
+    // shows the in-app incoming overlay — the user still presses Accept there.
+    // That matters because a full-screen intent fires on its own on a locked
+    // phone: if this deep link answered by itself it would pick up calls
+    // nobody agreed to take.
+    val answer = buildAnswerIntent(call)
+    val decline = buildDeclineIntent(call)
+    // Deliberately not the answer intent: a full-screen intent fires BY ITSELF
+    // on a locked or idle phone, and the body is tappable by accident. Neither
+    // may pick up a call. Only the Answer button carries answered=1.
+    val show = buildShowCallIntent(call)
 
-    val notification = NotificationCompat.Builder(applicationContext, FALLBACK_CHANNEL_ID)
+    val caller = Person.Builder()
+      .setName(call.callerName)
+      .setImportant(true)
+      .build()
+
+    val notification = NotificationCompat.Builder(applicationContext, RING_CHANNEL_ID)
       .setSmallIcon(R.drawable.notification_icon)
       .setContentTitle(call.callerName)
       .setContentText(
         if (call.isVideo) "Incoming video call" else "Incoming voice call",
       )
+      .setStyle(
+        NotificationCompat.CallStyle.forIncomingCall(caller, decline, answer),
+      )
       .setCategory(NotificationCompat.CATEGORY_CALL)
-      .setPriority(NotificationCompat.PRIORITY_HIGH)
+      .setPriority(NotificationCompat.PRIORITY_MAX)
       .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
-      .setAutoCancel(true)
-      .setContentIntent(pendingIntent)
-      .setFullScreenIntent(pendingIntent, true)
+      // Colorizing is normally reserved for foreground-service notifications;
+      // CallStyle is the exception, and it is what gives the filled, full-width
+      // caller row rather than a tinted icon on grey. Ignored where the
+      // platform declines it.
+      .setColorized(true)
+      .setColor(
+        ContextCompat.getColor(applicationContext, R.color.notification_icon_color),
+      )
+      // Ongoing so a ringing call cannot be swiped away by accident. The two
+      // buttons, the timeout below and CallActionReceiver are the ways out.
+      .setOngoing(true)
+      .setAutoCancel(false)
+      // Same 45s window the ringing service uses, so an unanswered call clears
+      // itself rather than sitting in the tray for ever on a dead process.
+      .setTimeoutAfter(RING_TIMEOUT_MS.toLong())
+      .setContentIntent(show)
+      .setFullScreenIntent(show, true)
       .build()
 
-    manager.notify(call.id.hashCode(), notification)
+    manager.notify(notificationId(call.id), notification)
+  }
+
+  /**
+   * Deep link into the call screen — the same one the patched library uses for
+   * a cold-start accept, so both routes land in exactly the same place.
+   */
+  private fun buildAnswerIntent(call: IncomingCall): PendingIntent {
+    val mode = if (call.isVideo) "VIDEO" else "AUDIO"
+    val deepLink = Intent(
+      Intent.ACTION_VIEW,
+      // answered=1 says the user pressed Accept, as opposed to merely tapping
+      // their way into the call screen. Without it the app could only open the
+      // call UI and then re-discover the state from the server — three network
+      // round trips deep into a cold start — which is why answering used to
+      // take the best part of ten seconds and frequently timed out into
+      // "Cancelled". mode rides along because the deep link was the one accept
+      // path with no access to the cached Pusher payload, so every cold-start
+      // answer to a video call opened as audio.
+      Uri.parse("questioncall://call/" + call.id + "?answered=1&mode=" + mode),
+    ).apply {
+      addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
+      // Lets MainActivity show over the keyguard instead of landing behind the
+      // lock screen — see IncomingCallActivity and the MainActivity patch.
+      putExtra("questioncall.showOverKeyguard", true)
+      putExtra("questioncall.answeredCallId", call.id)
+      putExtra("questioncall.answeredMode", mode)
+    }
+    return PendingIntent.getActivity(
+      applicationContext,
+      notificationId(call.id),
+      deepLink,
+      PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+    )
+  }
+
+  /**
+   * Open the call screen without answering.
+   *
+   * Backs the notification body and the full-screen intent. The full-screen
+   * intent in particular is fired by the system on its own when the phone is
+   * locked, so anything it launches must stop at the in-app incoming overlay
+   * and wait for a real press.
+   */
+  private fun buildShowCallIntent(call: IncomingCall): PendingIntent {
+    val mode = if (call.isVideo) "VIDEO" else "AUDIO"
+    val deepLink = Intent(
+      Intent.ACTION_VIEW,
+      Uri.parse("questioncall://call/" + call.id + "?mode=" + mode),
+    ).apply {
+      addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
+      putExtra("questioncall.showOverKeyguard", true)
+    }
+    return PendingIntent.getActivity(
+      applicationContext,
+      // Its own request code: FLAG_UPDATE_CURRENT would otherwise let this and
+      // the answer intent overwrite each other, and whichever lost would start
+      // answering (or stop answering) calls.
+      notificationId(call.id) xor 0x5303,
+      deepLink,
+      PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+    )
+  }
+
+  private fun buildDeclineIntent(call: IncomingCall): PendingIntent {
+    val intent = Intent(applicationContext, CallActionReceiver::class.java).apply {
+      action = ACTION_DECLINE
+      setPackage(applicationContext.packageName)
+      putExtra(EXTRA_CALL_ID, call.id)
+      putExtra(EXTRA_DECLINE_TOKEN, call.declineToken)
+      putExtra(EXTRA_DECLINE_URL, call.declineUrl)
+    }
+    return PendingIntent.getBroadcast(
+      applicationContext,
+      // Deliberately a different request code from the answer intent, so
+      // FLAG_UPDATE_CURRENT cannot have the two overwrite each other.
+      notificationId(call.id) xor 0x5EC1,
+      intent,
+      PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+    )
+  }
+
+  private fun ensureRingChannel(manager: NotificationManager) {
+    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
+
+    // The soundless channel this path used to post on. Deleting it keeps the
+    // app's notification settings honest for anyone upgrading.
+    try {
+      manager.deleteNotificationChannel(FALLBACK_CHANNEL_ID)
+    } catch (_: Exception) {
+      // Never had one, or the platform refused. Neither matters.
+    }
+
+    if (manager.getNotificationChannel(RING_CHANNEL_ID) != null) return
+
+    val channel = NotificationChannel(
+      RING_CHANNEL_ID,
+      "Incoming Calls",
+      NotificationManager.IMPORTANCE_HIGH,
+    ).apply {
+      description = "Rings when someone calls you."
+      enableVibration(true)
+      vibrationPattern = longArrayOf(0, 1000, 800, 1000, 800, 1000, 800, 1000)
+      lockscreenVisibility = Notification.VISIBILITY_PUBLIC
+      setShowBadge(false)
+      // USAGE_NOTIFICATION_RINGTONE puts this on the ring stream rather than the
+      // notification one, so it is as loud as a phone call should be. The asset
+      // is the same ringtone IncomingCallService loops.
+      setSound(
+        Uri.parse(
+          "android.resource://" + applicationContext.packageName + "/raw/incoming_ringtone",
+        ),
+        AudioAttributes.Builder()
+          .setUsage(AudioAttributes.USAGE_NOTIFICATION_RINGTONE)
+          .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
+          .build(),
+      )
+      // Silently ignored without notification-policy access, which this app
+      // does not ask for. Worth setting for anyone who has granted it.
+      try {
+        setBypassDnd(true)
+      } catch (_: Exception) {
+        // Not ours to have.
+      }
+    }
+    manager.createNotificationChannel(channel)
+  }
+}
+`;
+
+const CALL_ACTION_RECEIVER_KT = `package __APP_PACKAGE__
+
+import android.app.NotificationManager
+import android.content.BroadcastReceiver
+import android.content.Context
+import android.content.Intent
+import android.util.Log
+import com.facebook.react.bridge.Arguments
+import com.reactnativefullscreennotificationincomingcall.Constants
+import com.reactnativefullscreennotificationincomingcall.FullScreenNotificationIncomingCallModule
+import com.reactnativefullscreennotificationincomingcall.IncomingCallService
+import java.net.HttpURLConnection
+import java.net.URL
+import org.json.JSONObject
+
+/**
+ * Decline, pressed on the CallStyle notification CallNotificationService posts
+ * when the full-screen ringing service cannot be started.
+ *
+ * Still no React context and no bundle load: this runs on a cold process more
+ * often than not, and reaching for the JS runtime from here is what ANR'd an
+ * earlier attempt at this pipeline.
+ *
+ * It DOES make one network call, and that is the point. Declining used to
+ * silence this device only — the caller kept ringing until the server's RINGING
+ * timeout, and the ring-fallback tier would re-push the same call a few seconds
+ * later because the session was still, as far as the server knew, unanswered.
+ * The blocker was credentials: the real /reject wants a bearer token that only
+ * JS can read. So the push now carries a server-minted token good for exactly
+ * one thing — rejecting this one call — and the POST below spends it. No user
+ * credentials ever enter this process.
+ *
+ * Both paths fire on purpose. If JS happens to be alive it runs the real
+ * reject with full auth and tears down its own call state; the raw POST then
+ * lands on an already-REJECTED session and is refused. Rejecting twice is
+ * harmless and idempotent, whereas guessing wrong about whether JS is listening
+ * is how a decline silently goes nowhere.
+ */
+class CallActionReceiver : BroadcastReceiver() {
+  companion object {
+    private const val TAG = "CallActionReceiver"
+    // goAsync() buys roughly 10s before the system reclaims the receiver, so
+    // stay well inside it: a decline that hangs is worse than one that fails.
+    private const val CONNECT_TIMEOUT_MS = 7000
+    private const val READ_TIMEOUT_MS = 7000
+  }
+
+  override fun onReceive(context: Context, intent: Intent) {
+    if (intent.action != CallNotificationService.ACTION_DECLINE) return
+    val callId = intent.getStringExtra(CallNotificationService.EXTRA_CALL_ID)
+    if (callId.isNullOrEmpty()) return
+
+    val appContext = context.applicationContext
+
+    // Silence this device first, before anything that can block. Whatever the
+    // network does next, the user pressed Decline and the ringing stops now.
+    try {
+      appContext
+        .getSystemService(NotificationManager::class.java)
+        ?.cancel(CallNotificationService.notificationId(callId))
+    } catch (err: Exception) {
+      Log.w(TAG, "Could not clear the call notification", err)
+    }
+
+    // If the ringing service did come up after all — a late start racing this
+    // press — stop it so the ringtone dies with the notification.
+    try {
+      appContext.stopService(Intent(appContext, IncomingCallService::class.java))
+    } catch (_: Exception) {
+      // Not running; nothing to stop.
+    }
+
+    // Remember it, so a ring-fallback push already in flight cannot ring this
+    // same call back at us a few seconds from now. Needed even when the POST
+    // below succeeds: the push may already have left the server.
+    try {
+      CallDispatchStore.markDeclined(appContext, callId)
+    } catch (err: Exception) {
+      Log.w(TAG, "Could not record the decline", err)
+    }
+
+    notifyJs(callId)
+
+    val token = intent.getStringExtra(CallNotificationService.EXTRA_DECLINE_TOKEN)
+    val url = intent.getStringExtra(CallNotificationService.EXTRA_DECLINE_URL)
+    if (token.isNullOrEmpty() || url.isNullOrEmpty()) {
+      // A push minted before the server started sending the token. Falls back
+      // to the old behaviour: silent here, caller rings to the timeout.
+      Log.w(TAG, "No decline token on this push; leaving the session to time out")
+      return
+    }
+
+    val pending = goAsync()
+    Thread {
+      try {
+        postDecline(url, callId, token)
+      } catch (err: Exception) {
+        Log.w(TAG, "Decline POST failed; leaving the session to time out", err)
+      } finally {
+        pending.finish()
+      }
+    }.start()
+  }
+
+  /** Reaches the app only when it is alive; a no-op otherwise. */
+  private fun notifyJs(callId: String) {
+    try {
+      val params = Arguments.createMap()
+      params.putString("callUUID", callId)
+      params.putString("endAction", Constants.ACTION_REJECTED_CALL)
+      FullScreenNotificationIncomingCallModule.sendEventToJs(
+        Constants.RNNotificationEndCallAction,
+        params,
+      )
+    } catch (_: Throwable) {
+      // No JS running — the POST below is the one that counts.
+    }
+  }
+
+  private fun postDecline(rawUrl: String, callId: String, token: String) {
+    val url = URL(rawUrl)
+
+    // The endpoint rides in the push rather than being baked into the build, so
+    // it always matches the server that actually sent the call and there is no
+    // EXPO_PUBLIC_* constant to drift out of sync. The body is only a call id
+    // and a single-purpose token, but require https anyway — there is no reason
+    // to let a malformed payload put even that on the wire in the clear.
+    if (!"https".equals(url.protocol, ignoreCase = true)) {
+      Log.w(TAG, "Refusing a non-https decline URL")
+      return
+    }
+
+    val body = JSONObject()
+    body.put("callSessionId", callId)
+    body.put("token", token)
+    val payload = body.toString().toByteArray(Charsets.UTF_8)
+
+    val conn = url.openConnection() as HttpURLConnection
+    try {
+      conn.requestMethod = "POST"
+      conn.connectTimeout = CONNECT_TIMEOUT_MS
+      conn.readTimeout = READ_TIMEOUT_MS
+      conn.doOutput = true
+      conn.setRequestProperty("Content-Type", "application/json")
+      conn.setFixedLengthStreamingMode(payload.size)
+      conn.outputStream.use { it.write(payload) }
+      // Reading the code is what actually flushes the request.
+      Log.d(TAG, "Decline POST for " + callId + " -> HTTP " + conn.responseCode)
+    } finally {
+      conn.disconnect()
+    }
   }
 }
 `;
@@ -522,6 +1116,7 @@ import android.os.Build
 import android.provider.Settings
 import android.view.WindowManager
 import androidx.core.content.ContextCompat
+import com.facebook.react.bridge.Arguments
 import com.facebook.react.bridge.Promise
 import com.facebook.react.bridge.ReactApplicationContext
 import com.facebook.react.bridge.ReactContextBaseJavaModule
@@ -590,6 +1185,85 @@ class CallForegroundServiceModule(
     } catch (_: Exception) {
       // Never mute a call because the store failed — ring and risk a duplicate.
       promise.resolve(true)
+    }
+  }
+
+  /**
+   * Hand JS the accept the user pressed before JS existed.
+   *
+   * Answering an incoming call is delivered two ways, and on a cold start both
+   * of them are lost. The ringing library emits RNNotificationAnswerAction over
+   * the React bridge, which nothing is listening to yet because the tap is what
+   * created the process; and the notification's PendingIntent opens
+   * questioncall://call/<id>, which only ever meant "show me the call screen",
+   * so the app came up, worked out from the server that the call was still
+   * RINGING, and only then accepted it. Three round trips into a cold start,
+   * with a splash screen in front of them, and any hiccup along the way left
+   * the user staring at their chat list while the call timed out as
+   * "Cancelled".
+   *
+   * MainActivity now writes the decision down the moment it is launched, so it
+   * is waiting here by the time the bundle finishes loading. Drained exactly
+   * once (see CallDispatchStore.consumePendingAccept); resolves null when there
+   * is nothing pending, which is the normal case.
+   */
+  @ReactMethod
+  fun consumePendingAccept(promise: Promise) {
+    try {
+      val pending = CallDispatchStore.consumePendingAccept(reactContext)
+      if (pending == null) {
+        promise.resolve(null)
+        return
+      }
+      val map = Arguments.createMap()
+      map.putString("callSessionId", pending.first)
+      if (pending.second.isNotEmpty()) map.putString("mode", pending.second)
+      promise.resolve(map)
+    } catch (_: Exception) {
+      // Nothing to hand over is the safe answer: the deep-link route still
+      // opens the call screen, just without the head start.
+      promise.resolve(null)
+    }
+  }
+
+  /**
+   * Clear the CallStyle notification CallNotificationService posts when the
+   * full-screen ringing service cannot start.
+   *
+   * It is posted natively, outside expo-notifications, so the JS tray sweep in
+   * call-ui-store.ts cannot see it. Without this it would sit there ongoing —
+   * deliberately un-swipeable — while the call is already on screen.
+   */
+  @ReactMethod
+  fun dismissIncomingCallNotification(callSessionId: String?) {
+    val id = callSessionId ?: return
+    if (id.isEmpty()) return
+    try {
+      val manager =
+        reactContext.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+      manager.cancel(CallNotificationService.notificationId(id))
+    } catch (_: Exception) {
+      // Best effort only.
+    }
+  }
+
+  /**
+   * Mirror lib/active-call.ts into the native store.
+   *
+   * That set is the guard stopping a re-delivered call from surfacing on top of
+   * the live one, but it lives in JS memory, and CallNotificationService
+   * frequently runs with no JS at all — so the native path had no guard and a
+   * late ring-fallback push could ring during an active call. Mirroring costs
+   * one SharedPreferences write per call transition.
+   */
+  @ReactMethod
+  fun setCallActive(callSessionId: String?, active: Boolean) {
+    val id = callSessionId ?: return
+    if (id.isEmpty()) return
+    try {
+      CallDispatchStore.setActive(reactContext, id, active)
+    } catch (_: Exception) {
+      // Best effort — the JS-side guard still covers the app-alive case.
     }
   }
 
@@ -868,11 +1542,77 @@ function patchMainApplication(mainApplicationPath) {
  * and the questioncall://call/ deep link is recognised as well for the paths
  * that go through it. JS clears the flag when the call ends.
  */
+const PENDING_ACCEPT_FN = `
+  /**
+   * Persist "the user pressed Accept" the instant this activity is launched.
+   *
+   * The notification's Accept button is a PendingIntent straight to us, and the
+   * ringing library emits its answer over the React bridge. Both are useless on
+   * a cold start: the process is being created by the tap itself, so no JS is
+   * listening yet and the answer is dropped on the floor. The user then waits
+   * through a splash screen and lands on their chat list while the call they
+   * just accepted quietly times out as "Cancelled".
+   *
+   * Writing the decision to disk here, before super.onCreate and before the
+   * bundle loads, means JS can pick it up whenever it finishes booting. See
+   * CallDispatchStore.consumePendingAccept and lib/full-screen-call-notification.ts.
+   */
+  private fun recordPendingAccept(intent: Intent?) {
+    if (intent == null) return
+    try {
+      val uri = intent.data
+      val fromExtras = intent.getStringExtra("questioncall.answeredCallId")
+      val answeredViaUri =
+        uri != null &&
+          uri.toString().startsWith("questioncall://call/") &&
+          uri.getQueryParameter("answered") == "1"
+
+      val callId =
+        fromExtras?.takeIf { it.isNotEmpty() }
+          ?: (if (answeredViaUri) uri?.lastPathSegment else null)
+      if (callId.isNullOrEmpty()) return
+
+      val mode =
+        intent.getStringExtra("questioncall.answeredMode")?.takeIf { it.isNotEmpty() }
+          ?: uri?.getQueryParameter("mode")
+
+      // Already in this call, so JS handled the accept and this record would
+      // only be drained by some later cold start inside its TTL, dropping the
+      // user back into a call that has since ended.
+      if (CallDispatchStore.isActive(applicationContext, callId)) return
+
+      CallDispatchStore.recordPendingAccept(applicationContext, callId, mode)
+    } catch (_: Exception) {
+      // A malformed intent must never stop the activity from starting; the
+      // deep-link route in JS is still there as the slower fallback.
+    }
+  }`;
+
 function patchMainActivity(mainActivityPath) {
   if (!fs.existsSync(mainActivityPath)) return;
 
   let contents = fs.readFileSync(mainActivityPath, "utf8");
-  if (contents.includes("applyShowOverKeyguard")) return;
+  // Sentinel is the newest thing this function adds, so an android/ tree left
+  // over from a prebuild that predates the pending-accept store is upgraded
+  // rather than skipped as "already patched".
+  if (contents.includes("recordPendingAccept")) return;
+
+  // Carries the keyguard patch from an older prebuild: add only the missing
+  // half, in place, instead of re-inserting everything.
+  if (contents.includes("applyShowOverKeyguard")) {
+    contents = contents.replace(
+      "    applyShowOverKeyguard(intent)",
+      "    applyShowOverKeyguard(intent)\n    recordPendingAccept(intent)",
+    );
+    contents = contents.replace(
+      "  private fun applyShowOverKeyguard(intent: Intent?) {",
+      `${PENDING_ACCEPT_FN}
+
+  private fun applyShowOverKeyguard(intent: Intent?) {`,
+    );
+    fs.writeFileSync(mainActivityPath, contents);
+    return;
+  }
 
   contents = contents.replace(
     "import android.os.Bundle",
@@ -886,6 +1626,7 @@ import android.view.WindowManager`,
     `    // Before super.onCreate so the flags are in place for the first frame —
     // otherwise the call UI can flash behind the keyguard on a cold answer.
     applyShowOverKeyguard(intent)
+    recordPendingAccept(intent)
     super.onCreate(null)
   }
 
@@ -896,7 +1637,9 @@ import android.view.WindowManager`,
     // @NonNull, so a nullable override does not compile.
     setIntent(intent)
     applyShowOverKeyguard(intent)
+    recordPendingAccept(intent)
   }
+${PENDING_ACCEPT_FN}
 
   private fun applyShowOverKeyguard(intent: Intent?) {
     if (intent == null) return
@@ -959,6 +1702,10 @@ function withCallForegroundSource(config) {
       writeFileIfChanged(
         path.join(packageDir, "CallNotificationService.kt"),
         applyPackage(CALL_NOTIFICATION_SERVICE_KT, pkg),
+      );
+      writeFileIfChanged(
+        path.join(packageDir, "CallActionReceiver.kt"),
+        applyPackage(CALL_ACTION_RECEIVER_KT, pkg),
       );
       patchMainApplication(path.join(packageDir, "MainApplication.kt"));
       patchMainActivity(path.join(packageDir, "MainActivity.kt"));
@@ -1061,6 +1808,26 @@ function withCallKeepManifest(config) {
       // able to stop it.
       "android:stopWithTask": "true",
     });
+
+    // Decline on the CallStyle notification. Not exported: the only thing that
+    // ever sends this is our own PendingIntent.
+    if (!application.receiver) {
+      application.receiver = [];
+    }
+    const existingReceiver = application.receiver.find(
+      (receiver) => receiver.$?.["android:name"] === ".CallActionReceiver",
+    );
+    if (existingReceiver) {
+      existingReceiver.$ = {
+        ...existingReceiver.$,
+        "android:name": ".CallActionReceiver",
+        "android:exported": "false",
+      };
+    } else {
+      application.receiver.push({
+        $: { "android:name": ".CallActionReceiver", "android:exported": "false" },
+      });
+    }
 
     return mod;
   });

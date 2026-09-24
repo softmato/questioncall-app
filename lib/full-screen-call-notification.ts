@@ -1,10 +1,12 @@
 import { Platform, NativeModules, NativeEventEmitter } from "react-native";
-import { openCall } from "@/lib/call-ui-store";
+import { openCall, dismissNativeCallNotification } from "@/lib/call-ui-store";
 import {
   endCallKeepCall,
   reportCallConnected,
   preAcceptedCallRef,
+  pendingAcceptRef,
   incomingCallMetadataMap,
+  type PreAcceptedCallData,
 } from "@/lib/callkeep-setup";
 import { getPrewarmedCalleeRoom } from "@/lib/call-prewarm";
 import { isCallActive } from "@/lib/active-call";
@@ -41,11 +43,61 @@ export function setupFullScreenCallListeners() {
       void rejectCall(callUUID);
     }
   });
+
+  // The listeners above only catch an answer that happens while this JS context
+  // is alive. An answer from a killed app never reaches them.
+  void drainPendingNativeAccept();
 }
+
+/**
+ * Pick up an accept the user pressed before this JS context existed.
+ *
+ * Answering from a killed app is the case every event-based path gets wrong:
+ * the tap is what starts the process, so RNNotificationAnswerAction is emitted
+ * into a bridge with no listeners, and the deep link only ever said "open the
+ * call screen" — never "the user said yes". The app came up on whatever screen
+ * it was last on, nothing accepted the call, and it died as "Cancelled" while
+ * the user waited.
+ *
+ * MainActivity now records the decision straight from the launch intent, before
+ * the bundle loads (see plugins/withCallKeep.js). This drains it. Called once
+ * from setupFullScreenCallListeners(), which runs at module scope in the root
+ * layout, so it fires as early as JS can possibly run.
+ */
+export async function drainPendingNativeAccept(): Promise<void> {
+  if (Platform.OS !== "android") return;
+  const native = NativeModules.CallForegroundService as
+    | { consumePendingAccept?: () => Promise<PendingNativeAccept | null> }
+    | undefined;
+  if (!native?.consumePendingAccept) return;
+
+  try {
+    const pending = await native.consumePendingAccept();
+    if (!pending?.callSessionId) return;
+    const mode =
+      pending.mode === "VIDEO" || pending.mode === "AUDIO" ? pending.mode : undefined;
+    await acceptCall(pending.callSessionId, mode);
+  } catch (err) {
+    console.warn(
+      "[call] Could not replay the pending accept:",
+      err instanceof Error ? err.message : String(err),
+    );
+  }
+}
+
+type PendingNativeAccept = { callSessionId?: string; mode?: string };
 
 // Exported: also invoked by the CallKeep answerCall listener (the only accept
 // surface on iOS). Idempotent via the isCallActive guard.
-export async function acceptCall(callSessionId: string) {
+export async function acceptCall(
+  callSessionId: string,
+  /**
+   * Mode from a transport that has it when the metadata cache does not — the
+   * accept deep link and the native pending-accept record both carry it. Every
+   * cold-start answer to a video call used to open as audio without this.
+   */
+  modeHint?: "AUDIO" | "VIDEO",
+) {
   // Guard: if we're already inside this call, the notification is a stale
   // duplicate (e.g. native FCM re-dispatch). Just clear it instead of
   // re-running /accept and re-navigating to the same live screen.
@@ -53,6 +105,16 @@ export async function acceptCall(callSessionId: string) {
     incomingCallMetadataMap.delete(callSessionId);
     hideFullScreenCallNotification();
     endCallKeepCall(callSessionId);
+    return;
+  }
+
+  // An accept for this call is already on the wire. Both the native
+  // pending-accept drain and the questioncall://call/<id>?answered=1 deep link
+  // land here for the same tap (deliberately — either one alone can be the only
+  // survivor of a cold start), so the second arrival must not POST /accept
+  // again. Re-focusing the call UI is all it has left to do.
+  if (pendingAcceptRef.current?.callSessionId === callSessionId) {
+    openCall({ roomId: callSessionId, mode: modeHint });
     return;
   }
 
@@ -67,6 +129,7 @@ export async function acceptCall(callSessionId: string) {
   // mode is authoritative — the server /accept response is a fallback for
   // cases where the user accepts before we cached anything (e.g. cold start).
   const meta = incomingCallMetadataMap.get(callSessionId);
+  const mode = meta?.mode ?? modeHint;
 
   // If realtime-bridge already pre-warmed a LiveKit room from the Pusher
   // payload, the call screen will consume it directly. We can hand it the
@@ -127,45 +190,70 @@ export async function acceptCall(callSessionId: string) {
     return;
   }
 
-  // Fallback: no pre-warm available (e.g. Pusher payload was missing the
-  // token for some reason). Use the original blocking /accept path.
-  try {
-    const { api } = await import("@/lib/api");
-    const { getDeviceId } = await import("@/lib/app-identity");
-    const res = await api.post(`/calls/${callSessionId}/accept`, {
-      deviceId: getDeviceId(),
-    });
-    const data = res.data as any;
-    if (data?.token && data?.serverUrl) {
+  // Fallback: no pre-warm available. Either the Pusher payload was missing the
+  // token, or — far more often — this is a cold start, where nothing had a
+  // chance to pre-warm anything because the process did not exist a second ago.
+  //
+  // This path used to await POST /accept and only then open the call UI. On a
+  // cold start that request queues behind the bundle load, so the user pressed
+  // Accept and then watched their chat list for several seconds; if anything
+  // went wrong they never saw a call at all, just "Cancelled" in the history.
+  // Put the call UI up first and let the request finish underneath it, the way
+  // every native dialler does. <CallScreen/> picks the promise up from
+  // pendingAcceptRef, so it neither refetches the session nor accepts twice.
+  const acceptPromise = (async (): Promise<PreAcceptedCallData | null> => {
+    try {
+      const { api } = await import("@/lib/api");
+      const { getDeviceId } = await import("@/lib/app-identity");
+      const res = await api.post(`/calls/${callSessionId}/accept`, {
+        deviceId: getDeviceId(),
+      });
+      const data = res.data as any;
+      if (!data?.token || !data?.serverUrl) return null;
       const serverMode =
         data.mode === "VIDEO" || data.mode === "AUDIO" ? data.mode : null;
-      preAcceptedCallRef.current = {
+      return {
         token: data.token,
         serverUrl: data.serverUrl,
         channelId: data.channelId ?? meta?.channelId ?? "",
         timerDeadline: data.timerDeadline,
         timeExtensionCount: data.timeExtensionCount ?? 0,
-        // Prefer the mode from the original pusher payload — that's what
-        // displayed "video call" to the user.  Only fall back to the server
-        // response when we have no cached metadata.
-        mode: meta?.mode ?? serverMode ?? "AUDIO",
+        // Prefer the mode the user was actually shown ringing. The server
+        // response is the last resort.
+        mode: mode ?? serverMode ?? "AUDIO",
         callerId: data.callerId ?? meta?.callerId ?? "",
       };
+    } catch (err: any) {
+      // 409 = already accepted (our own retry, or another device). Fall through
+      // to the call screen either way and let it reconcile with the server.
+      if (err?.response?.status !== 409) {
+        console.warn(
+          "[acceptCall] /accept failed:",
+          err instanceof Error ? err.message : String(err),
+        );
+      }
+      return null;
     }
-  } catch (err: any) {
-    if (err?.response?.status === 409) {
-      // Already accepted elsewhere — still navigate to the call
-    }
-  }
+  })();
+
+  // Park it before opening the UI: openCall() schedules the render that mounts
+  // <CallScreen/>, and the screen looks for this on its first pass.
+  pendingAcceptRef.current = { callSessionId, promise: acceptPromise };
+
   incomingCallMetadataMap.delete(callSessionId);
   reportCallConnected(callSessionId);
-  openCall({ roomId: callSessionId, mode: meta?.mode });
+  openCall({ roomId: callSessionId, mode });
+
+  await acceptPromise;
 }
 
 // Exported: also invoked by the notification's Decline action (see _layout).
 export async function rejectCall(callSessionId: string) {
   incomingCallMetadataMap.delete(callSessionId);
   hideFullScreenCallNotification();
+  // hideFullScreenCallNotification() only stops IncomingCallService. The
+  // CallStyle fallback notification is ours and outlives it.
+  dismissNativeCallNotification(callSessionId);
   endCallKeepCall(callSessionId);
   try {
     const { api } = await import("@/lib/api");

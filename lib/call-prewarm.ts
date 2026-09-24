@@ -16,6 +16,7 @@
 import type { Room as LKRoom } from "livekit-client";
 
 import { api } from "@/lib/api";
+import { CALL_ROOM_OPTIONS } from "@/lib/call-room-options";
 
 export type PrewarmTokenPayload = {
   token: string;
@@ -92,7 +93,7 @@ export async function prewarmCallerRoom(channelId: string) {
   }
 
   const { Room, RoomEvent } = await import("livekit-client");
-  const room = new Room({ adaptiveStream: false, dynacast: false });
+  const room = new Room(CALL_ROOM_OPTIONS);
   const slot: CallerSlot = {
     channelId,
     room,
@@ -168,7 +169,7 @@ export async function prewarmCalleeRoom(args: {
   }
 
   const { Room, RoomEvent } = await import("livekit-client");
-  const room = new Room({ adaptiveStream: false, dynacast: false });
+  const room = new Room(CALL_ROOM_OPTIONS);
   const slot: CalleeSlot = {
     callSessionId: args.callSessionId,
     channelId: args.channelId,

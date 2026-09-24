@@ -16,6 +16,38 @@ export const preAcceptedCallRef: { current: PreAcceptedCallData | null } = {
   current: null,
 };
 
+/**
+ * An accept whose POST /calls/:id/accept has not come back yet.
+ *
+ * preAcceptedCallRef above only helps when a token is already in hand, which
+ * means the Pusher pre-warm path. A cold start has no pre-warm: the process is
+ * being created by the very tap that answered the call, so acceptCall() has to
+ * go to the network. It used to await that POST before opening the call UI, and
+ * on a cold start that lands on top of a bundle load, so the user sat looking at
+ * their chat list for several seconds after answering.
+ *
+ * Now the call UI opens immediately and the in-flight request is parked here.
+ * <CallScreen/> picks it up on mount and awaits it instead of re-deriving the
+ * session with its own GET /calls/:id (and then accepting a second time, which
+ * is where the 409s came from).
+ */
+export const pendingAcceptRef: {
+  current: {
+    callSessionId: string;
+    promise: Promise<PreAcceptedCallData | null>;
+  } | null;
+} = { current: null };
+
+/** Take the in-flight accept for this call, if it is the one waiting. */
+export function consumePendingAccept(
+  callSessionId: string,
+): Promise<PreAcceptedCallData | null> | null {
+  const pending = pendingAcceptRef.current;
+  if (!pending || pending.callSessionId !== callSessionId) return null;
+  pendingAcceptRef.current = null;
+  return pending.promise;
+}
+
 // Metadata captured from the pusher CALL_INCOMING_EVENT (and push notifications)
 // at the moment the call comes in.  The native full-screen notification's
 // accept event only delivers a callUUID, so without this cache the only source

@@ -1,4 +1,5 @@
 import { useSyncExternalStore } from "react";
+import { NativeModules, Platform } from "react-native";
 import * as Notifications from "expo-notifications";
 
 /**
@@ -19,6 +20,16 @@ export type CallUiParams = {
   /** Channel id — required when roomId === "pending". */
   channelId?: string;
   mode?: "AUDIO" | "VIDEO";
+  /**
+   * Whether arriving at the call screen counts as answering.
+   *
+   * True everywhere the user has actually pressed Accept. False only for the
+   * surfaces that just *show* an incoming call: the notification body, and the
+   * full-screen intent — which Android fires on its own when the phone is
+   * locked. Those must stop at the Accept/Decline screen, or a locked phone
+   * answers calls nobody agreed to take.
+   */
+  autoAccept?: boolean;
 };
 
 type CallUiState = {
@@ -60,22 +71,57 @@ export function openCall(params: CallUiParams) {
 }
 
 /**
+ * Clear the CallStyle notification the native FCM service posts when the
+ * full-screen ringing service cannot be started (see plugins/withCallKeep.js).
+ *
+ * That notification is built straight from NotificationManager rather than
+ * through expo-notifications, so the tray sweep below cannot see it, and it is
+ * deliberately ongoing so the user cannot swipe it away either. Only native
+ * code can retire it.
+ *
+ * A no-op on an older binary that predates the native method.
+ */
+export function dismissNativeCallNotification(callSessionId: string) {
+  if (Platform.OS !== "android") return;
+  if (!callSessionId || callSessionId === "pending") return;
+  const native = NativeModules.CallForegroundService as
+    | { dismissIncomingCallNotification?: (id: string) => void }
+    | undefined;
+  try {
+    native?.dismissIncomingCallNotification?.(callSessionId);
+  } catch {
+    // Older binary without the method — nothing of ours to clear.
+  }
+}
+
+/**
  * Clear tray copies of the incoming-call push once the call is being answered.
  *
  * The server's ring-fallback tier (web/app/api/calls/create/route.ts) re-sends
- * a call that is still unanswered ~5s in as a system-rendered notification, so
+ * a call that is still unanswered ~5s in as a notification-payload push, so
  * OEMs that refuse to start our process for the data-only push still show
- * something. On devices where the real ring DID fire, that fallback lands as
- * an extra tray entry — and answering via the full-screen UI never routes
- * through JS notification handling, so nothing else would clean it up. A stale
- * "Incoming call — tap to answer" that navigates to a dead session looks like
- * a bug; sweep it the moment any path opens this call.
+ * something. CallNotificationService.handleIntent now claims those before
+ * Firebase can draw them, so a duplicate should no longer reach the tray — but
+ * a build that predates it, or any other path that renders a call push through
+ * expo-notifications, still can. Answering via the full-screen UI never routes
+ * through JS notification handling either, so nothing else would clean it up,
+ * and a stale "Incoming call — tap to answer" that navigates to a dead session
+ * looks like a bug. Sweep the moment any path opens this call.
  *
  * Targeted on purpose: only notifications carrying this call's id. Chat and
  * question notifications must survive a call.
  */
 function dismissCallTrayNotifications(roomId: string) {
   if (!roomId || roomId === "pending") return;
+
+  // The CallStyle notification the native FCM service posts when the
+  // full-screen ringing service cannot start (see plugins/withCallKeep.js) is
+  // built straight from NotificationManager, so getPresentedNotificationsAsync
+  // below never sees it — and it is deliberately ongoing, so the user cannot
+  // swipe it away either. Clear it natively or it sits there ringing at a call
+  // that is already answered.
+  dismissNativeCallNotification(roomId);
+
   void Notifications.getPresentedNotificationsAsync()
     .then((presented) => {
       for (const notification of presented) {

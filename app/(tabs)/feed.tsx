@@ -5,8 +5,6 @@ import {
   Easing,
   FlatList,
   Modal,
-  type NativeScrollEvent,
-  type NativeSyntheticEvent,
   RefreshControl,
   StatusBar,
   StyleSheet,
@@ -17,6 +15,13 @@ import {
 } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
 import { router, useFocusEffect } from "expo-router";
+import Animated, {
+  Extrapolation,
+  interpolate,
+  useAnimatedScrollHandler,
+  useAnimatedStyle,
+  useSharedValue,
+} from "react-native-reanimated";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import Toast from "react-native-toast-message";
 
@@ -32,6 +37,7 @@ import { useTabBarScroll } from "@/components/ui/bottom-chrome";
 import { useAppDispatch, useAppSelector } from "@/hooks/redux";
 import { useAppTheme } from "@/hooks/use-app-theme";
 import { api, publicApi } from "@/lib/api";
+import { prefetchChannels, PREFETCH_CHANNEL_COUNT } from "@/lib/channel-prefetch";
 import { QUESTIONS_FEED_PAGE_SIZE } from "@/lib/feed-config";
 import { questionSummary } from "@/lib/question-summary";
 import { scheduleAnswerDeadlineReminder } from "@/lib/local-notifications";
@@ -232,34 +238,43 @@ export default function FeedScreen() {
   // Modal slide-up animation
   const modalSlide = useRef(new RNAnimated.Value(0)).current;
 
-  // ─── Sticky header: track scroll offset (native-driven for smoothness) ───
-  const scrollY = useRef(new RNAnimated.Value(0)).current;
-  // The tab bar hides on scroll from the same events. This screen already owns
-  // its `Animated.event` for the pinned top bar, so the bar is fed through that
-  // event's `listener` slot rather than a second, competing scroll handler.
-  const { onScrollOffset, tabBarClearance } = useTabBarScroll();
-  const onScroll = useMemo(
-    () =>
-      RNAnimated.event([{ nativeEvent: { contentOffset: { y: scrollY } } }], {
-        useNativeDriver: true,
-        listener: (event: NativeSyntheticEvent<NativeScrollEvent>) => {
-          onScrollOffset(event.nativeEvent.contentOffset.y);
-        },
-      }),
-    [onScrollOffset, scrollY],
-  );
+  // ─── Scroll: one handler, on the UI thread ──────────────────────────────
+  // The pinned top bar and the tab bar both hang off this. They used to be
+  // driven separately, with the tab bar riding a `listener` on an RN
+  // `Animated.event`; that delivers offsets on the JS thread, which this screen
+  // keeps busy rendering question cards, so the tab bar missed the reversal
+  // that should have brought it back.
+  const { scrollEventThrottle, tabBarClearance, trackOffset } = useTabBarScroll();
+  const scrollY = useSharedValue(0);
+  const onScroll = useAnimatedScrollHandler({
+    onScroll: (event) => {
+      scrollY.value = event.contentOffset.y;
+      trackOffset?.(event.contentOffset.y);
+    },
+  });
+
   // Bar starts COLLAPSE_DISTANCE px lower, then rises and pins under the status bar.
-  const barTranslateY = scrollY.interpolate({
-    inputRange: [0, COLLAPSE_DISTANCE],
-    outputRange: [COLLAPSE_DISTANCE, 0],
-    extrapolate: "clamp",
-  });
+  const topBarStyle = useAnimatedStyle(() => ({
+    transform: [
+      {
+        translateY: interpolate(
+          scrollY.value,
+          [0, COLLAPSE_DISTANCE],
+          [COLLAPSE_DISTANCE, 0],
+          Extrapolation.CLAMP,
+        ),
+      },
+    ],
+  }));
   // Bottom hairline/shadow fades in once the bar is stuck, for separation.
-  const barBorderOpacity = scrollY.interpolate({
-    inputRange: [0, COLLAPSE_DISTANCE],
-    outputRange: [0, 1],
-    extrapolate: "clamp",
-  });
+  const topBarBorderStyle = useAnimatedStyle(() => ({
+    opacity: interpolate(
+      scrollY.value,
+      [0, COLLAPSE_DISTANCE],
+      [0, 1],
+      Extrapolation.CLAMP,
+    ),
+  }));
 
   // Debounce search: wait 300ms after user stops typing before filtering
   useEffect(() => {
@@ -380,28 +395,13 @@ export default function FeedScreen() {
         const raw = Array.isArray(res.data) ? res.data : [];
         dispatch(setChannels({ channels: raw, userId }));
 
-        // Prefetch top 10 channels' recent messages in parallel
-        const topChannels = raw.slice(0, 10);
-        if (topChannels.length > 0) {
+        // Warm the top channels' chats so opening one is instant.
+        const topChannelIds = raw.map((ch: any) => ch.id);
+        if (topChannelIds.length > 0) {
           console.log(
-            `[prefetch] Prefetching messages for ${topChannels.length} channels...`,
+            `[prefetch] Prefetching messages for up to ${PREFETCH_CHANNEL_COUNT} channels...`,
           );
-          await Promise.all(
-            topChannels.map(async (ch: any) => {
-              try {
-                const msgRes = await api.get(`/channels/${ch.id}?limit=20`);
-                const { channel: detail, messages } = msgRes.data;
-                if (detail && Array.isArray(messages)) {
-                  dispatch(setChannelData({ channelId: ch.id, detail, messages }));
-                }
-              } catch (err: any) {
-                console.warn(
-                  `[prefetch] Failed to prefetch messages for channel ${ch.id}:`,
-                  err?.message,
-                );
-              }
-            }),
-          );
+          await prefetchChannels(topChannelIds);
           console.log("[prefetch] Channel messages prefetch complete");
         }
       }
@@ -747,7 +747,14 @@ export default function FeedScreen() {
           dispatch(
             setChannelData({
               channelId,
-              detail: bootstrap.channel,
+              detail: {
+                ...bootstrap.channel,
+                // The chat screen treats a missing questionImages as an
+                // unusable cache entry and refetches, so always land an array.
+                questionImages: Array.isArray(bootstrap.channel.questionImages)
+                  ? bootstrap.channel.questionImages
+                  : [],
+              },
               messages: bootstrap.messages ?? [],
             }),
           );
@@ -1174,11 +1181,11 @@ export default function FeedScreen() {
 
       {renderFilterModal()}
 
-      <RNAnimated.FlatList
+      <Animated.FlatList
         ref={flatListRef}
         data={visibleQuestions}
         onScroll={onScroll}
-        scrollEventThrottle={16}
+        scrollEventThrottle={scrollEventThrottle}
         maintainVisibleContentPosition={{ minIndexForVisible: 0 }}
         keyExtractor={getQuestionKey}
         renderItem={renderQuestionItem}
@@ -1231,31 +1238,35 @@ export default function FeedScreen() {
       />
 
       {/* Pinned top bar — scrolls up a touch, then sticks below the status bar */}
-      <RNAnimated.View
+      <Animated.View
         pointerEvents="box-none"
-        style={{
-          position: "absolute",
-          top: 0,
-          left: 0,
-          right: 0,
-          zIndex: 20,
-          backgroundColor: feedColors.page,
-          paddingTop: insets.top,
-          transform: [{ translateY: barTranslateY }],
-        }}
+        style={[
+          {
+            position: "absolute",
+            top: 0,
+            left: 0,
+            right: 0,
+            zIndex: 20,
+            backgroundColor: feedColors.page,
+            paddingTop: insets.top,
+          },
+          topBarStyle,
+        ]}
       >
         <View style={{ paddingTop: 6, paddingBottom: 8 }}>
           <FeedTopBar unreadCount={unreadCount} />
         </View>
-        <RNAnimated.View
+        <Animated.View
           pointerEvents="none"
-          style={{
-            height: StyleSheet.hairlineWidth,
-            backgroundColor: feedColors.divider,
-            opacity: barBorderOpacity,
-          }}
+          style={[
+            {
+              height: StyleSheet.hairlineWidth,
+              backgroundColor: feedColors.divider,
+            },
+            topBarBorderStyle,
+          ]}
         />
-      </RNAnimated.View>
+      </Animated.View>
     </View>
   );
 }

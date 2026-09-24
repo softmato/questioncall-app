@@ -3,6 +3,7 @@ import {
   ActivityIndicator,
   Alert,
   AppState,
+  Dimensions,
   FlatList,
   Image,
   KeyboardAvoidingView,
@@ -23,10 +24,12 @@ import Toast from "react-native-toast-message";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { useImageViewer } from "@/components/image-viewer/image-viewer-context";
 import ChannelTimer from "@/components/channel/ChannelTimer";
+import { ChatSkeleton } from "@/components/channel/ChatSkeleton";
 import { MessageItem } from "@/components/channel/MessageItem";
 
 import { useAppDispatch, useAppSelector } from "@/hooks/redux";
 import { useAppTheme } from "@/hooks/use-app-theme";
+import { useKeyboardVisible } from "@/hooks/use-keyboard-visible";
 import { api } from "@/lib/api";
 import {
   ANSWER_SUBMITTED_EVENT,
@@ -53,6 +56,7 @@ import {
   setChannelLoading,
   setChannelStatus,
   setChannelTimer,
+  setActiveChannel,
   setMessageDeleted,
   toggleMessageMarked,
   type ChatMessage,
@@ -71,6 +75,9 @@ import {
 } from "@/lib/call-prewarm";
 import { openCall } from "@/lib/call-ui-store";
 import { hasAnyActiveCall } from "@/lib/active-call";
+
+/** Constant breathing room under the composer / closed-channel footer. */
+const COMPOSER_BOTTOM_GAP = 10;
 
 function formatMessageTime(iso: string) {
   const d = new Date(iso);
@@ -103,8 +110,12 @@ export default function WorkspaceScreen() {
   const cached = useAppSelector((s) =>
     channelId ? (s.channel.cache[channelId] ?? null) : null,
   );
-  const isLoading = useAppSelector((s) => s.channel.isLoading);
   const channelError = useAppSelector((s) => s.channel.error);
+  // The channels list already carries the counterpart's name/avatar, so the
+  // skeleton can show the real identity while the chat itself loads.
+  const listItem = useAppSelector((s) =>
+    channelId ? (s.channels.list.find((c) => c.id === channelId) ?? null) : null,
+  );
   const {
     statusBarStyle,
     backgroundColor,
@@ -123,7 +134,9 @@ export default function WorkspaceScreen() {
   const chatHeaderColor = isDark ? "#111b18" : backgroundColor;
   const chatPanelColor = isDark ? "#17231f" : cardColor;
   const chatInputColor = isDark ? "#202c27" : "#f1f5f9";
-  const chatPrimaryActionColor = isDark ? "#00a884" : "#111827";
+  // The composer action reads as the same accent as an own-message bubble,
+  // so send/mic and the messages it produces belong to one palette.
+  const chatPrimaryActionColor = primaryColor;
   const chatPrimaryActionTextColor = "#ffffff";
   const chatTextColor = isDark ? "#e9edef" : "#111827";
   const chatSubtleIconColor = isDark ? "#8696a0" : "#64748b";
@@ -133,6 +146,13 @@ export default function WorkspaceScreen() {
   const isActive = detail?.status === "ACTIVE";
 
   const insets = useSafeAreaInsets();
+  const isKeyboardVisible = useKeyboardVisible();
+
+  // Gap between the bottom bar and whatever sits directly under it — the
+  // keyboard when it's open, the system nav bar when it isn't. The safe-area
+  // inset is only added in the second case, because an open keyboard already
+  // covers that strip; adding both is what made the bar drift upward.
+  const bottomBarPadding = COMPOSER_BOTTOM_GAP + (isKeyboardVisible ? 0 : insets.bottom);
 
   const [inputText, setInputText] = useState("");
   const [isSending, setIsSending] = useState(false);
@@ -226,23 +246,19 @@ export default function WorkspaceScreen() {
 
   useEffect(() => {
     if (!channelId) return;
-    const isFresh =
-      cachedRef.current && Date.now() - cachedRef.current.fetchedAt < CACHE_TTL_MS;
-    if (isFresh && cachedRef.current) {
-      const cachedDetail = cachedRef.current.detail;
-      // If this cache entry pre-dates the questionImages field (redux-persist
-      // rehydration of old data), force a fresh fetch instead of serving
-      // stale data that would make the banner show "No images attached."
-      if (!Array.isArray(cachedDetail.questionImages)) {
-        fetchChannelRef.current?.();
-      } else {
-        dispatch(
-          setChannelData({
-            channelId,
-            detail: cachedDetail,
-            messages: cachedRef.current.messages,
-          }),
-        );
+    const entry = cachedRef.current;
+    // Cache entries that pre-date the questionImages field (redux-persist
+    // rehydration of old data) are unusable — serving them would make the
+    // banner claim "No images attached."
+    const hasUsableCache = !!entry && Array.isArray(entry.detail?.questionImages);
+
+    if (hasUsableCache && entry) {
+      // Paint from cache immediately — no spinner, no skeleton. A stale entry
+      // still renders; it just refreshes underneath. `force` keeps the global
+      // loading flag down so the cached chat stays on screen while it does.
+      dispatch(setActiveChannel(channelId));
+      if (Date.now() - entry.fetchedAt >= CACHE_TTL_MS) {
+        void fetchChannelRef.current?.(true);
       }
     } else if (fetchChannelRef.current) {
       fetchChannelRef.current();
@@ -981,10 +997,34 @@ export default function WorkspaceScreen() {
     return result;
   }, [messages, visibleCount]);
 
+  // Consecutive messages from one sender read as a single block: only the last
+  // of a run carries the timestamp, and only its outer corner is flattened.
+  const isSameSender = useCallback(
+    (
+      a?: ChatMessage | { __dateSeparator: string },
+      b?: ChatMessage | { __dateSeparator: string },
+    ) => {
+      if (!a || !b) return false;
+      if ("__dateSeparator" in a || "__dateSeparator" in b) return false;
+      if (a.isSystemMessage || b.isSystemMessage) return false;
+      if (a.isDeleted || b.isDeleted) return false;
+      return (a.isOwn || a.senderId === userId) === (b.isOwn || b.senderId === userId);
+    },
+    [userId],
+  );
+
   const renderItem = useCallback(
-    ({ item }: { item: ChatMessage | { __dateSeparator: string } }) => (
+    ({
+      item,
+      index,
+    }: {
+      item: ChatMessage | { __dateSeparator: string };
+      index: number;
+    }) => (
       <MessageItem
         item={item}
+        isGroupStart={!isSameSender(item, messagesWithDates[index - 1])}
+        isGroupEnd={!isSameSender(item, messagesWithDates[index + 1])}
         userId={userId}
         isAcceptor={isAcceptor}
         isActive={isActive}
@@ -1013,32 +1053,47 @@ export default function WorkspaceScreen() {
       openImageViewer,
       handleRetry,
       handleToggleMark,
+      isSameSender,
+      messagesWithDates,
     ],
   );
 
-  // ─── Loading state ────────────────────────────────────────────
-  if (isLoading || !detail) {
+  // ─── Error state ──────────────────────────────────────────────
+  // Only blocks the screen when there is nothing cached to show; a failed
+  // background refresh leaves the cached conversation in place.
+  if (!detail && channelError) {
     return (
       <View className="flex-1 items-center justify-center bg-background">
         <StatusBar barStyle={statusBarStyle} backgroundColor={backgroundColor} />
-        {channelError ? (
-          <View className="items-center px-8">
-            <Ionicons name="alert-circle-outline" size={48} color="#ef4444" />
-            <Text className="mt-3 text-center text-base text-foreground">
-              {channelError}
-            </Text>
-            <TouchableOpacity
-              onPress={() => void fetchChannel(true)}
-              className="mt-4 rounded-full px-6 py-2.5"
-              style={{ backgroundColor: primaryColor }}
-            >
-              <Text className="font-semibold text-white">Retry</Text>
-            </TouchableOpacity>
-          </View>
-        ) : (
-          <ActivityIndicator color={primaryColor} size="large" />
-        )}
+        <View className="items-center px-8">
+          <Ionicons name="alert-circle-outline" size={48} color="#ef4444" />
+          <Text className="mt-3 text-center text-base text-foreground">
+            {channelError}
+          </Text>
+          <TouchableOpacity
+            onPress={() => void fetchChannel(true)}
+            className="mt-4 rounded-full px-6 py-2.5"
+            style={{ backgroundColor: primaryColor }}
+          >
+            <Text className="font-semibold text-white">Retry</Text>
+          </TouchableOpacity>
+        </View>
       </View>
+    );
+  }
+
+  // ─── Loading state ────────────────────────────────────────────
+  // Cold cache only. A skeleton in the shape of the real chat replaces the
+  // blank screen the spinner used to leave behind, and the header shows the
+  // counterpart we already know about from the channels list.
+  if (!detail) {
+    return (
+      <ChatSkeleton
+        counterpartName={listItem?.counterpartName}
+        counterpartImage={listItem?.counterpartImage}
+        questionTitle={listItem?.questionTitle}
+        screenWidth={Dimensions.get("window").width}
+      />
     );
   }
 
@@ -1120,6 +1175,19 @@ export default function WorkspaceScreen() {
   return (
     <KeyboardAvoidingView
       behavior="padding"
+      // Android's own "pan" mode (app.json softwareKeyboardLayoutMode) only
+      // scrolls the focused EditText into view — it stops as soon as the text
+      // field clears the keyboard and leaves the pill's padding and the bar's
+      // own padding underneath it. So the lifting here has to stay on.
+      //
+      // What it must NOT do is keep that padding after the keyboard is gone:
+      // under edge-to-edge, KeyboardAvoidingView's
+      // `max(frame.y + frame.height - keyboardFrame.screenY, 0)` doesn't reach
+      // zero on hide, and the leftover stranded the bar a nav-bar's height off
+      // the bottom for the rest of the session. Disabling it while the keyboard
+      // is down forces that padding to 0 (see `bottomHeight` in RN's
+      // KeyboardAvoidingView) without touching the keyboard-open behaviour.
+      enabled={Platform.OS === "ios" || isKeyboardVisible}
       className="flex-1 bg-background"
       style={{ backgroundColor: chatSurfaceColor }}
       keyboardVerticalOffset={Platform.OS === "ios" ? insets.top : 0}
@@ -1449,7 +1517,7 @@ export default function WorkspaceScreen() {
             borderTopColor: borderColor,
             paddingHorizontal: 12,
             paddingTop: 10,
-            paddingBottom: Math.max(insets.bottom, Platform.OS === "ios" ? 20 : 8) + 4,
+            paddingBottom: bottomBarPadding,
           }}
         >
           {/* ── Recording in progress ── */}
@@ -1643,7 +1711,7 @@ export default function WorkspaceScreen() {
             borderTopColor: borderColor,
             paddingHorizontal: 16,
             paddingVertical: 14,
-            paddingBottom: Math.max(insets.bottom, Platform.OS === "ios" ? 20 : 8) + 6,
+            paddingBottom: bottomBarPadding,
           }}
         >
           <Text className="text-center text-sm text-muted-foreground">

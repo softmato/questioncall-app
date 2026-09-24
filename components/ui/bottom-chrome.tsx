@@ -123,7 +123,21 @@ export function BottomChromeProvider({ children }: { children: ReactNode }) {
         accumulated.value = 0;
       }
 
-      accumulated.value += delta;
+      /*
+       * Clamped, so a long scroll in one direction cannot build a debt that has
+       * to be repaid before the bar will come back. Without this the counter
+       * grows with the list: after a 2000px scroll down it sits at +2000, and
+       * every reversal has to burn all of it off first — which shows up as a
+       * bar that only returns at the top of the list. The reset above normally
+       * prevents that, but it only fires on a *clean* reversal, and a list that
+       * corrects its own offset (`maintainVisibleContentPosition`, a settling
+       * `RefreshControl`) interleaves the two directions. The bound is the
+       * recovery cost in the worst case: a few tens of pixels, not a whole list.
+       */
+      accumulated.value = Math.min(
+        Math.max(accumulated.value + delta, -SHOW_AFTER * 4),
+        HIDE_AFTER * 4,
+      );
 
       /*
        * `hidden` guards the animation. Without it every scroll frame would
@@ -173,11 +187,15 @@ export function useBottomChrome() {
  * What a tab screen needs to take part in hide-on-scroll.
  *
  * - `onScroll` for a Reanimated `Animated.ScrollView` / `Animated.FlatList`.
- * - `onScrollOffset` for a screen that already owns its `Animated.event` and
- *   only has a `listener` slot to spare — the feed's pinned top bar.
+ * - `trackOffset` is the same logic as a bare worklet, for a screen that drives
+ *   something else from the same scroll and needs one handler for both.
  * - `tabBarClearance` for the content's bottom padding. The bar is absolutely
  *   positioned so that hiding it does not reflow the list behind it, which
  *   means content has to reserve the height itself.
+ *
+ * Every tab screen goes through Reanimated. A screen feeding this from a
+ * JS-thread scroll handler instead gets the offsets late and coalesced while
+ * its list is rendering rows — which is precisely when someone is scrolling.
  */
 export function useTabBarScroll() {
   const chrome = useBottomChrome();
@@ -200,12 +218,10 @@ export function useTabBarScroll() {
     },
   });
 
-  const onScrollOffset = useCallback(
-    (offsetY: number) => {
-      handleScroll?.(offsetY);
-    },
-    [handleScroll],
-  );
-
-  return { onScroll, onScrollOffset, scrollEventThrottle: 16, tabBarClearance: height };
+  return {
+    onScroll,
+    scrollEventThrottle: 16,
+    tabBarClearance: height,
+    trackOffset: handleScroll,
+  };
 }

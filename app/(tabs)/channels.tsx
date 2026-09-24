@@ -25,6 +25,11 @@ import { useAppTheme } from "@/hooks/use-app-theme";
 import { useTabBarScroll } from "@/components/ui/bottom-chrome";
 import Animated from "react-native-reanimated";
 import { api } from "@/lib/api";
+import {
+  prefetchChannel,
+  prefetchChannels,
+  PREFETCH_CHANNEL_COUNT,
+} from "@/lib/channel-prefetch";
 
 // ─── Time formatter ───────────────────────────────────────────
 function formatChannelTime(iso?: string): string {
@@ -103,6 +108,9 @@ function ChannelRow({
   return (
     <TouchableOpacity
       onPress={() => router.push(`/workspace/${item.id}` as any)}
+      // Warm this channel the moment the finger lands — by the time the fade
+      // finishes the chat usually has its data and never shows a skeleton.
+      onPressIn={() => void prefetchChannel(item.id)}
       activeOpacity={0.55}
       style={{
         flexDirection: "row",
@@ -308,7 +316,12 @@ export default function ChannelsScreen() {
   const [searchQuery, setSearchQuery] = useState("");
 
   const cacheMatchesUser = loadedForUserId === userId;
-  const channels = cacheMatchesUser ? list : [];
+  // Memoized so the empty-cache branch doesn't hand out a fresh [] each render
+  // and re-run every downstream memo/effect that depends on it.
+  const channels = useMemo(
+    () => (cacheMatchesUser ? list : []),
+    [cacheMatchesUser, list],
+  );
   const shouldUseCache = cacheMatchesUser && !selectIsChannelsStale(lastFetchedAt);
   const showInitialSpinner = isLoading && channels.length === 0;
 
@@ -332,6 +345,23 @@ export default function ChannelsScreen() {
   useEffect(() => {
     void loadChannels();
   }, [loadChannels]);
+
+  // ─── Warm the top of the list ─────────────────────────────────
+  // Keyed on the ids alone so unread/preview updates don't re-trigger it.
+  // prefetchChannels is TTL-gated and deduped, so a repeat run is a no-op.
+  const topChannelIds = useMemo(
+    () =>
+      channels
+        .slice(0, PREFETCH_CHANNEL_COUNT)
+        .map((c) => c.id)
+        .join(","),
+    [channels],
+  );
+
+  useEffect(() => {
+    if (!topChannelIds) return;
+    void prefetchChannels(topChannelIds.split(","));
+  }, [topChannelIds]);
 
   const handleRefresh = useCallback(async () => {
     dispatch(setChannelsRefreshing(true));

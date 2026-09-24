@@ -33,12 +33,14 @@ import Animated, {
 } from "react-native-reanimated";
 
 import { api } from "@/lib/api";
+import { CALL_ROOM_OPTIONS } from "@/lib/call-room-options";
 import { useAppSelector } from "@/hooks/redux";
 import { closeCall, minimizeCall, resolveCallRoomId } from "@/lib/call-ui-store";
 import {
   endCallKeepCall,
   reportCallConnected,
   preAcceptedCallRef,
+  consumePendingAccept,
 } from "@/lib/callkeep-setup";
 import {
   consumeCallerPrewarm,
@@ -100,6 +102,11 @@ const CONNECTION_TIMEOUT_MS = 20_000;
 // Grace before treating "remote participant left the room" as a possible call
 // end — covers transient peer network blips without delaying real hangups.
 const REMOTE_LEFT_GRACE_MS = 2_000;
+// How long to keep a call open for a peer the SFU has dropped. Past this they
+// are not coming back, and somebody has to tell the server the call is over —
+// a killed app never will, and the session would otherwise sit ACTIVE for ever
+// and block every future call on the channel.
+const REMOTE_LEFT_END_MS = 12_000;
 
 // Android renders each VideoView into its own SurfaceView, and SurfaceViews sit
 // outside React Native's view hierarchy — stacking order comes from these
@@ -122,6 +129,12 @@ export type CallScreenProps = {
   roomId: string;
   channelId?: string | null;
   mode?: string | null;
+  /**
+   * False when this screen was opened by something that merely shows an
+   * incoming call (notification body, full-screen intent) rather than by the
+   * user answering. Such a screen waits at Accept/Decline instead of picking up.
+   */
+  autoAccept?: boolean;
   /** True when the persistent host is showing the floating bubble. */
   minimized: boolean;
   /**
@@ -142,6 +155,7 @@ export function CallScreen({
   roomId: routeRoomId,
   channelId: routeChannelId,
   mode: routeMode,
+  autoAccept = true,
   minimized,
   canMinimize = true,
 }: CallScreenProps) {
@@ -261,6 +275,7 @@ export function CallScreen({
     if (!tracksPublished || !connected || session?.status !== "ACTIVE") return;
     startOngoingCallService(session.mode);
   }, [tracksPublished, connected, session?.status, session?.mode]);
+
   // Whether the local PiP is the fullscreen view (and remote sits in the corner)
   const [pipSwapped, setPipSwapped] = useState(false);
   const remoteVideoTrack = remoteScreenTrack ?? remoteCameraTrack;
@@ -575,18 +590,72 @@ export function CallScreen({
       return;
     }
 
-    api
-      .get(`/calls/${routeRoomId}`)
-      .then((res) => setSession(res.data as CallSession))
-      .catch((err: unknown) => {
-        const msg = err instanceof Error ? err.message : String(err);
-        console.error("[call] Failed to fetch session:", msg);
-        Toast.show({
-          type: "error",
-          text1: "Couldn't load this call. Please try again.",
+    let cancelled = false;
+
+    const fetchSession = () =>
+      api
+        .get(`/calls/${routeRoomId}`)
+        .then((res) => {
+          if (!cancelled) setSession(res.data as CallSession);
+        })
+        .catch((err: unknown) => {
+          if (cancelled) return;
+          const msg = err instanceof Error ? err.message : String(err);
+          console.error("[call] Failed to fetch session:", msg);
+          Toast.show({
+            type: "error",
+            text1: "Couldn't load this call. Please try again.",
+          });
+        })
+        .finally(() => {
+          if (!cancelled) setLoading(false);
         });
-      })
-      .finally(() => setLoading(false));
+
+    // An accept for this call is already on the wire — acceptCall() started it
+    // and opened this screen without waiting, so the user is looking at the call
+    // UI while the request is still in flight. Wait on that instead of issuing
+    // our own GET /calls/:id: the response already carries the token, and the
+    // status it reports is ACTIVE, so the auto-accept effect below has nothing
+    // left to do. The old shape — fetch the session, see RINGING, POST /accept
+    // a second time — is what made answering from a cold start three sequential
+    // round trips deep and produced the 409s.
+    const inFlightAccept = consumePendingAccept(routeRoomId);
+    if (inFlightAccept) {
+      void inFlightAccept.then((accepted) => {
+        if (cancelled) return;
+        if (!accepted) {
+          // The accept came back without a token (409, or a network failure).
+          // Ask the server what actually happened rather than guessing.
+          void fetchSession();
+          return;
+        }
+        prefetchedTokenRef.current = {
+          token: accepted.token,
+          serverUrl: accepted.serverUrl,
+          channelId: accepted.channelId,
+          timerDeadline: accepted.timerDeadline,
+          timeExtensionCount: accepted.timeExtensionCount,
+        };
+        const calleePrewarm = consumeCalleePrewarm(routeRoomId);
+        if (calleePrewarm) prewarmedRoomRef.current = calleePrewarm.room;
+        setSession({
+          callSessionId: routeRoomId,
+          channelId: accepted.channelId,
+          callerId: accepted.callerId,
+          mode: accepted.mode,
+          status: "ACTIVE" as CallStatus,
+        } as CallSession);
+        setLoading(false);
+      });
+      return () => {
+        cancelled = true;
+      };
+    }
+
+    void fetchSession();
+    return () => {
+      cancelled = true;
+    };
   }, [isPendingRoute, routeRoomId]);
 
   // ── Consume the caller-side pre-warmed room ───────────────────────────────
@@ -660,7 +729,7 @@ export function CallScreen({
         // — we just attach our event listeners and skip straight to publishing.
         const prewarmed = prewarmedRoomRef.current;
         prewarmedRoomRef.current = null;
-        const room = prewarmed ?? new Room({ adaptiveStream: false, dynacast: false });
+        const room = prewarmed ?? new Room(CALL_ROOM_OPTIONS);
         roomRef.current = room;
 
         const syncRoomVideoTracks = () => {
@@ -745,7 +814,28 @@ export function CallScreen({
                   Toast.show({ type: "info", text1: "Call ended" });
                   roomRef.current?.disconnect();
                   goBack();
+                  return;
                 }
+
+                if (status !== "ACTIVE") return;
+
+                // The peer is gone and the server still thinks the call is
+                // running, which is what a force-stopped app looks like: it
+                // never got to POST /end. Waiting for a Pusher event that is
+                // never coming is how the survivor ended up stuck on "Waiting
+                // for video…" while the session stayed ACTIVE and locked the
+                // channel out of new calls. Give them one reconnect window,
+                // then end it from this side.
+                await new Promise((r) => setTimeout(r, REMOTE_LEFT_END_MS));
+                if (endingRef.current || roomRef.current !== room) return;
+                if (room.remoteParticipants.size > 0) return;
+                endingRef.current = true;
+                await api
+                  .post(`/calls/${roomId}/end`, { deviceId: getDeviceId() })
+                  .catch(() => {});
+                Toast.show({ type: "info", text1: "Call ended" });
+                roomRef.current?.disconnect();
+                goBack();
               } catch {
                 // Status check failed — leave teardown to the Pusher event.
               }
@@ -857,8 +947,9 @@ export function CallScreen({
         // Caller pre-joins the LiveKit room while ringing but defers
         // enableCameraAndMicrophone() so the ringtone audio session is undisturbed.
         void connectToRoom(true);
-      } else {
-        // Callee arrived at call screen (from overlay) — auto-accept
+      } else if (autoAccept) {
+        // Callee got here by answering — finish the accept. Also the retry path
+        // when acceptCall()'s own POST failed and left the session RINGING.
         void acceptHandlerRef.current();
       }
     }
@@ -870,6 +961,7 @@ export function CallScreen({
     connecting,
     connectionError,
     connectToRoom,
+    autoAccept,
   ]);
 
   // ── Enable tracks when RINGING → ACTIVE (caller side) ───────────────────
@@ -1294,7 +1386,12 @@ export function CallScreen({
     setScreenShareBusy(true);
     try {
       await room.localParticipant.setScreenShareEnabled(next);
-      setScreenSharing(next);
+      // Deliberately NOT setScreenSharing(next) here. This promise resolving
+      // means "the capture request was accepted", not "frames are going out",
+      // and on Android those are not the same thing — the button claimed to be
+      // sharing while the peer saw black. RoomEvent.LocalTrackPublished /
+      // Unpublished (see connectToRoom) are the only honest signal, and they
+      // also cover the user stopping the share from the system shade.
     } catch (err: unknown) {
       // Most common failure: the user dismissed the system consent dialog.
       const msg = err instanceof Error ? err.message : String(err);
@@ -1602,25 +1699,27 @@ export function CallScreen({
       <View style={styles.activeContainer}>
         {/* Main video (fullscreen) */}
         {mainTrack ? (
-          mainIsRemoteScreen ? (
-            <View style={styles.screenShareStage}>
-              <VideoView
-                videoTrack={mainTrack}
-                style={styles.screenShareVideo}
-                objectFit="contain"
-                mirror={false}
-                zOrder={VIDEO_Z_STAGE}
-              />
-            </View>
-          ) : (
+          // ONE element shape for the camera stage and the screen-share stage,
+          // switching only styles and props. This used to be two different JSX
+          // branches, and swapping between them made React tear the <VideoView/>
+          // down and mount a fresh one — which on Android means destroying a
+          // SurfaceView and creating another. A new SurfaceView does not
+          // reliably re-establish its compositing order against the surfaces
+          // already on screen (see the note on VIDEO_Z_OVERLAY below, and the
+          // identical lesson in persistent-call-host.tsx), so the peer's screen
+          // share arrived, published, and rendered as a black rectangle while
+          // the sharer's own UI correctly said it was sharing. Keeping the
+          // hierarchy stable makes the swap a prop update on a surface that is
+          // already composited correctly.
+          <View style={mainIsRemoteScreen ? styles.screenShareStage : styles.cameraStage}>
             <VideoView
               videoTrack={mainTrack}
-              style={StyleSheet.absoluteFillObject}
-              objectFit="cover"
-              mirror={mainIsLocal}
+              style={styles.stageVideo}
+              objectFit={mainIsRemoteScreen ? "contain" : "cover"}
+              mirror={mainIsLocal && !mainIsRemoteScreen}
               zOrder={VIDEO_Z_STAGE}
             />
-          )
+          </View>
         ) : (
           <LinearGradient
             colors={["#0d1b2a", "#1a1a2e", "#0f0c29"]}
@@ -1945,6 +2044,11 @@ const styles = StyleSheet.create({
     flex: 1,
     backgroundColor: "#000",
   },
+  // Full-bleed camera stage. Same element as the screen-share stage below, so
+  // that switching between them is a style change rather than a remount.
+  cameraStage: {
+    ...StyleSheet.absoluteFillObject,
+  },
   screenShareStage: {
     ...StyleSheet.absoluteFillObject,
     alignItems: "center",
@@ -1953,7 +2057,7 @@ const styles = StyleSheet.create({
     paddingTop: Platform.OS === "ios" ? 72 : 64,
     paddingBottom: Platform.OS === "ios" ? 144 : 128,
   },
-  screenShareVideo: {
+  stageVideo: {
     width: "100%",
     height: "100%",
     backgroundColor: "#000",

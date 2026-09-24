@@ -32,7 +32,7 @@
       "channel": "production",
       "environment": "production",
       "android": {
-        "buildType": "apk"
+        "buildType": "app-bundle"
       }
     }
   },

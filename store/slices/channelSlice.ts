@@ -113,6 +113,47 @@ const channelSlice = createSlice({
       state.isLoading = false;
       state.error = null;
     },
+    /**
+     * Warms the cache for a channel the user has *not* opened yet.
+     *
+     * Unlike `setChannelData` this never touches `activeChannelId` — a
+     * background prefetch of ten channels must not make the last one to
+     * resolve "active", or realtime messages would land in the wrong chat.
+     * Locally-owned messages (still sending, or failed and queued for retry)
+     * are preserved: the server response doesn't know about them yet.
+     */
+    prefetchChannelData(
+      state,
+      action: PayloadAction<{
+        channelId: string;
+        detail: ChannelDetail;
+        messages: ChatMessage[];
+      }>,
+    ) {
+      const { channelId, detail, messages } = action.payload;
+      const existing = state.cache[channelId];
+      const localOnly =
+        existing?.messages.filter((m) => m.isSending || m.sendFailed) ?? [];
+      const serverIds = new Set(messages.map(getMessageId));
+      state.cache[channelId] = {
+        detail,
+        messages: [
+          ...messages,
+          ...localOnly.filter((m) => !serverIds.has(getMessageId(m))),
+        ],
+        fetchedAt: Date.now(),
+      };
+    },
+    /**
+     * Marks a channel active without replacing its cached payload — used when
+     * the chat screen opens on a warm cache, so it can paint immediately and
+     * refresh in the background instead of blocking on the network.
+     */
+    setActiveChannel(state, action: PayloadAction<string>) {
+      state.activeChannelId = action.payload;
+      state.isLoading = false;
+      state.error = null;
+    },
     appendMessage(state, action: PayloadAction<ChatMessage>) {
       const msg = action.payload;
       // Try active channel first, then fall back to the message's own channelId
@@ -246,6 +287,8 @@ export const {
   setChannelLoading,
   setChannelError,
   setChannelData,
+  prefetchChannelData,
+  setActiveChannel,
   appendMessage,
   addPendingMessage,
   resolvePendingMessage,

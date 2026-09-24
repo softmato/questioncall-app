@@ -77,6 +77,21 @@ if (typeof globalThis.Event === "undefined") {
 ensureLiveKitRegistered();
 setupCallKeep();
 setupFullScreenCallListeners();
+// Theme, applied at module scope so it is in effect before the first frame.
+// `userInterfaceStyle` is "automatic" in app.json — that is what lets
+// Appearance.setColorScheme() take at all, but it also means a device set to
+// dark boots dark. Restoring from an effect would paint that dark frame first
+// and flash to light. SecureStore.getItem is the synchronous read, so the
+// stored choice wins before anything renders.
+// Light is the product default: only an explicit "dark" or "system" leaves it.
+try {
+  const themePreference = SecureStore.getItem("theme_preference");
+  if (themePreference === "dark") Appearance.setColorScheme("dark");
+  else if (themePreference === "system") Appearance.setColorScheme(null);
+  else Appearance.setColorScheme("light");
+} catch {
+  Appearance.setColorScheme("light");
+}
 // Reaching module scope means JS is starting fresh, so no call can be in
 // progress yet. Any ongoing-call service still alive is a leftover from a
 // previous process that died mid-call — its notification is ongoing, so the
@@ -126,19 +141,6 @@ if (sentryDsn) {
 }
 
 function AppInitializer({ children }: { children: React.ReactNode }) {
-  useEffect(() => {
-    SecureStore.getItemAsync("theme_preference")
-      .then((pref) => {
-        if (pref === "dark") Appearance.setColorScheme("dark");
-        else if (pref === "system") Appearance.setColorScheme(null);
-        // No stored preference (new user) or explicit "light" → light.
-        else Appearance.setColorScheme("light");
-      })
-      .catch(() => {
-        Appearance.setColorScheme("light");
-      });
-  }, []);
-
   const fetchPlatformConfig = useCallback(async () => {
     try {
       const res = await api.get("/platform/config");
@@ -399,7 +401,11 @@ function RootLayout() {
                     <Stack.Screen
                       name="workspace/[channelId]"
                       options={{
-                        animation: "slide_from_right",
+                        // Cross-fade into the chat: the list and the chat share
+                        // the same header geometry, so a slide reads as a jolt
+                        // where a fade reads as the row expanding in place.
+                        animation: "fade",
+                        animationDuration: 180,
                         gestureEnabled: true,
                       }}
                     />

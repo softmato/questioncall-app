@@ -1,5 +1,5 @@
 diff --git a/node_modules/react-native-full-screen-notification-incoming-call/android/src/main/java/com/reactnativefullscreennotificationincomingcall/IncomingCallActivity.java b/node_modules/react-native-full-screen-notification-incoming-call/android/src/main/java/com/reactnativefullscreennotificationincomingcall/IncomingCallActivity.java
-index 3395f00..f88c697 100644
+index 3395f00..f7c94cc 100644
 --- a/node_modules/react-native-full-screen-notification-incoming-call/android/src/main/java/com/reactnativefullscreennotificationincomingcall/IncomingCallActivity.java
 +++ b/node_modules/react-native-full-screen-notification-incoming-call/android/src/main/java/com/reactnativefullscreennotificationincomingcall/IncomingCallActivity.java
 @@ -90,19 +90,9 @@ public class IncomingCallActivity extends AppCompatActivity implements DefaultHa
@@ -25,7 +25,7 @@ index 3395f00..f88c697 100644
      } else {
        setContentView(R.layout.activity_call_incoming);
      }
-@@ -166,15 +156,45 @@ public class IncomingCallActivity extends AppCompatActivity implements DefaultHa
+@@ -166,15 +156,56 @@ public class IncomingCallActivity extends AppCompatActivity implements DefaultHa
  
    private void acceptDialing() {
      active = false;
@@ -51,8 +51,18 @@ index 3395f00..f88c697 100644
 +      // App is alive — JS event handles navigation. Just bring app to front.
 +      String packageName = getApplicationContext().getPackageName();
 +      Intent launchIntent = getPackageManager().getLaunchIntentForPackage(packageName);
++    // Tag every accept launch with the call it answered, whichever branch we
++    // take. sendEventToJs() only throws when the static reactContext is null,
++    // i.e. a process that has never hosted React. A process that hosted React
++    // and was then killed leaves a STALE context behind: emit() succeeds against
++    // a dead bridge, eventSent comes back true, and we bring the app up on
++    // whatever screen it was last on while the accept goes nowhere. That is the
++    // "I answered and it just reopened the app" report, and it is why liveness
++    // cannot be inferred from an exception. MainActivity reads this extra before
++    // any JS runs and parks it for the bundle to collect.
 +      if (launchIntent != null) {
 +        launchIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_REORDER_TO_FRONT);
++        launchIntent.putExtra("questioncall.answeredCallId", uuid);
 +        // This activity is allowed over the keyguard; MainActivity is not,
 +        // unless told. Without this the call connects but the user just sees
 +        // the lock screen until they unlock. MainActivity reads the extra
@@ -63,9 +73,10 @@ index 3395f00..f88c697 100644
 +    } else {
 +      // App is killed — deep link cold-starts directly to call screen
 +      Intent deepLink = new Intent(Intent.ACTION_VIEW,
-+        android.net.Uri.parse("questioncall://call/" + uuid));
++        android.net.Uri.parse("questioncall://call/" + uuid + "?answered=1"));
 +      deepLink.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TOP);
 +      deepLink.putExtra("questioncall.showOverKeyguard", true);
++      deepLink.putExtra("questioncall.answeredCallId", uuid);
 +      startActivity(deepLink);
 +    }
 +
@@ -201,10 +212,10 @@ index 502fe36..49ee298 100644
        }
      }
 diff --git a/node_modules/react-native-full-screen-notification-incoming-call/android/src/main/java/com/reactnativefullscreennotificationincomingcall/NotificationReceiverHandler.java b/node_modules/react-native-full-screen-notification-incoming-call/android/src/main/java/com/reactnativefullscreennotificationincomingcall/NotificationReceiverHandler.java
-index beb50db..d8cfd87 100644
+index beb50db..262c1dc 100644
 --- a/node_modules/react-native-full-screen-notification-incoming-call/android/src/main/java/com/reactnativefullscreennotificationincomingcall/NotificationReceiverHandler.java
 +++ b/node_modules/react-native-full-screen-notification-incoming-call/android/src/main/java/com/reactnativefullscreennotificationincomingcall/NotificationReceiverHandler.java
-@@ -72,8 +72,40 @@ public class NotificationReceiverHandler {
+@@ -72,8 +72,51 @@ public class NotificationReceiverHandler {
      }
      params.putBoolean("accept", true);
      params.putString("callUUID", uuid);
@@ -222,11 +233,21 @@ index beb50db..d8cfd87 100644
 +    if (Constants.RNNotificationAnswerAction.equals(eventName) && uuid != null && !uuid.isEmpty()) {
 +      if (!eventSent) {
 +        // App killed — deep link cold-starts directly to call screen
++        // Tag every accept launch with the call it answered, whichever branch we
++        // take. sendEventToJs() only throws when the static reactContext is null,
++        // i.e. a process that has never hosted React. A process that hosted React
++        // and was then killed leaves a STALE context behind: emit() succeeds against
++        // a dead bridge, eventSent comes back true, and we bring the app up on
++        // whatever screen it was last on while the accept goes nowhere. That is the
++        // "I answered and it just reopened the app" report, and it is why liveness
++        // cannot be inferred from an exception. MainActivity reads this extra before
++        // any JS runs and parks it for the bundle to collect.
 +        Intent deepLink = new Intent(Intent.ACTION_VIEW,
-+          android.net.Uri.parse("questioncall://call/" + uuid));
++          android.net.Uri.parse("questioncall://call/" + uuid + "?answered=1"));
 +        deepLink.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TOP);
 +        // Allow MainActivity over the keyguard — see IncomingCallActivity.
 +        deepLink.putExtra("questioncall.showOverKeyguard", true);
++        deepLink.putExtra("questioncall.answeredCallId", uuid);
 +        context.startActivity(deepLink);
 +      } else {
 +        // App alive but not necessarily on screen: accepting from the
@@ -239,6 +260,7 @@ index beb50db..d8cfd87 100644
 +        if (launchIntent != null) {
 +          launchIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_REORDER_TO_FRONT);
 +          launchIntent.putExtra("questioncall.showOverKeyguard", true);
++          launchIntent.putExtra("questioncall.answeredCallId", uuid);
 +          context.startActivity(launchIntent);
 +        }
 +      }

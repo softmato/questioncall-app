@@ -165,6 +165,7 @@ export function PersistentCallHost() {
               roomId={params.roomId}
               channelId={params.channelId ?? null}
               mode={params.mode ?? null}
+              autoAccept={params.autoAccept ?? true}
               minimized={minimized}
               canMinimize={canMinimize}
             />

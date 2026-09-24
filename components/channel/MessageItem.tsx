@@ -7,6 +7,10 @@ import type { ChatMessage } from "@/store/slices/channelSlice";
 
 type Props = {
   item: ChatMessage | { __dateSeparator: string };
+  /** First message of a run from this sender — gets the full outer radius. */
+  isGroupStart?: boolean;
+  /** Last of the run — carries the timestamp and the flattened tail corner. */
+  isGroupEnd?: boolean;
   userId: string | null;
   isAcceptor: boolean;
   isActive: boolean;
@@ -27,15 +31,16 @@ const BARS = [4, 8, 14, 10, 18, 12, 20, 14, 10, 16, 8, 18, 12, 6, 14, 10, 18, 8,
 
 function WaveformBars({
   progress,
-  isOwn,
+  onAccent,
   isDark,
 }: {
   progress: number;
-  isOwn: boolean;
+  /** True when the bubble behind these bars is the solid accent fill. */
+  onAccent: boolean;
   isDark: boolean;
 }) {
-  const activeColor = isOwn ? "#ffffff" : isDark ? "#cbd5e1" : "#374151";
-  const inactiveColor = isOwn
+  const activeColor = onAccent ? "#ffffff" : isDark ? "#cbd5e1" : "#374151";
+  const inactiveColor = onAccent
     ? "rgba(255,255,255,0.3)"
     : isDark
       ? "rgba(203,213,225,0.22)"
@@ -62,12 +67,13 @@ function WaveformBars({
 // ── Audio player ──────────────────────────────────────────────
 function AudioMessagePlayer({
   mediaUrl,
-  isOwn,
+  onAccent,
   isDark,
   primaryColor,
 }: {
   mediaUrl: string;
-  isOwn: boolean;
+  /** True when this player sits on the solid accent bubble. */
+  onAccent: boolean;
   isDark: boolean;
   primaryColor: string;
 }) {
@@ -159,7 +165,7 @@ function AudioMessagePlayer({
           borderRadius: 19,
           alignItems: "center",
           justifyContent: "center",
-          backgroundColor: isOwn
+          backgroundColor: onAccent
             ? "rgba(255,255,255,0.2)"
             : isDark
               ? "rgba(255,255,255,0.12)"
@@ -169,25 +175,25 @@ function AudioMessagePlayer({
         {isLoading ? (
           <ActivityIndicator
             size="small"
-            color={isOwn ? "#fff" : isDark ? "#e2e8f0" : "#374151"}
+            color={onAccent ? "#fff" : isDark ? "#e2e8f0" : "#374151"}
           />
         ) : (
           <Ionicons
             name={isPlaying ? "pause" : "play"}
             size={18}
-            color={isOwn ? "#fff" : isDark ? "#e2e8f0" : "#374151"}
+            color={onAccent ? "#fff" : isDark ? "#e2e8f0" : "#374151"}
           />
         )}
       </TouchableOpacity>
 
       {/* Waveform + duration */}
       <View style={{ flex: 1 }}>
-        <WaveformBars progress={progress} isOwn={isOwn} isDark={isDark} />
+        <WaveformBars progress={progress} onAccent={onAccent} isDark={isDark} />
         <Text
           style={{
             fontSize: 11,
             marginTop: 3,
-            color: isOwn
+            color: onAccent
               ? "rgba(255,255,255,0.65)"
               : isDark
                 ? "rgba(226,232,240,0.62)"
@@ -204,6 +210,8 @@ function AudioMessagePlayer({
 // ── Main message item ─────────────────────────────────────────
 function MessageItemInner({
   item,
+  isGroupStart = true,
+  isGroupEnd = true,
   userId,
   isAcceptor,
   isActive,
@@ -293,16 +301,21 @@ function MessageItemInner({
   const isOwn = msg.isOwn || msg.senderId === userId;
   const showMark = isAcceptor && isActive && isOwn && !isAnswerSubmitted;
 
-  // Bubble colours: WhatsApp-inspired dark mode, clean neutral light mode.
-  const sentBg = isDark ? "#0b5d45" : "#111827";
-  const receivedBg = isDark ? "#202c27" : cardColor;
+  // Bubble colours.
+  //
+  // The incoming side carries the brand green at full strength with white text
+  // (~4.9:1) so the other person's messages are what draws the eye. Own
+  // messages sit back on the same hue dropped to a low-opacity tint — heavier
+  // in dark mode so it still separates from the near-black chat surface — with
+  // near-solid foreground text, so legibility comes from the text rather than
+  // from the tint.
+  const sentBg = isDark ? "rgba(10,138,75,0.22)" : "rgba(10,138,75,0.09)";
+  const receivedBg = primaryColor;
   const bubbleBg = isOwn ? sentBg : receivedBg;
-  const textColor = isOwn ? "#ffffff" : isDark ? "#e9edef" : "#111827";
-  const timeColor = isOwn
-    ? "rgba(255,255,255,0.62)"
-    : isDark
-      ? "rgba(233,237,239,0.56)"
-      : "rgba(0,0,0,0.4)";
+  const textColor = isOwn ? (isDark ? "#e9edef" : "#0f172a") : "#ffffff";
+  // The meta line now sits outside the bubble, so it reads against the chat
+  // surface rather than the bubble fill.
+  const metaColor = isDark ? "rgba(233,237,239,0.55)" : "rgba(15,23,42,0.5)";
 
   // Answer-marked overlay
   const isMarked = !!msg.isMarkedAsAnswer;
@@ -310,7 +323,10 @@ function MessageItemInner({
   return (
     <View
       style={{
-        marginVertical: 2,
+        // Tight inside a run, open between runs — the grouping does the
+        // visual separating so the bubbles themselves can stay quiet.
+        marginTop: isGroupStart ? 8 : 2,
+        marginBottom: isGroupEnd ? 2 : 0,
         paddingHorizontal: 14,
         alignItems: isOwn ? "flex-end" : "flex-start",
       }}
@@ -319,8 +335,13 @@ function MessageItemInner({
         style={{
           maxWidth: "78%",
           borderRadius: 20,
-          // Flatten the corner on the "tail" side like a real chat bubble
-          ...(isOwn ? { borderBottomRightRadius: 4 } : { borderBottomLeftRadius: 4 }),
+          // Only the tail of a run gets its outer corner flattened; messages
+          // stacked above it stay fully rounded.
+          ...(isGroupEnd
+            ? isOwn
+              ? { borderBottomRightRadius: 6 }
+              : { borderBottomLeftRadius: 6 }
+            : {}),
           paddingHorizontal: 14,
           paddingVertical: 10,
           backgroundColor: bubbleBg,
@@ -346,7 +367,7 @@ function MessageItemInner({
         {msg.mediaType === "AUDIO" && msg.mediaUrl ? (
           <AudioMessagePlayer
             mediaUrl={msg.mediaUrl}
-            isOwn={isOwn}
+            onAccent={!isOwn}
             isDark={isDark}
             primaryColor={primaryColor}
           />
@@ -357,44 +378,6 @@ function MessageItemInner({
           <Text style={{ fontSize: 15, lineHeight: 22, color: textColor }}>
             {msg.content}
           </Text>
-        ) : null}
-
-        {/* Footer: time + delivery icons */}
-        <View
-          style={{
-            flexDirection: "row",
-            alignItems: "center",
-            justifyContent: "flex-end",
-            gap: 3,
-            marginTop: 4,
-          }}
-        >
-          <Text style={{ fontSize: 11, color: timeColor }}>
-            {formatMessageTime(msg.sentAt)}
-          </Text>
-          {isOwn && !msg.sendFailed && (
-            <>
-              {msg.isSending && (
-                <Ionicons name="time-outline" size={12} color={timeColor} />
-              )}
-              {msg.isSeen ? (
-                <Ionicons name="checkmark-done" size={13} color="#60a5fa" />
-              ) : msg.isDelivered ? (
-                <Ionicons name="checkmark" size={13} color={timeColor} />
-              ) : null}
-            </>
-          )}
-        </View>
-
-        {/* Retry */}
-        {msg.sendFailed ? (
-          <TouchableOpacity
-            onPress={() => onRetry(msg)}
-            style={{ flexDirection: "row", alignItems: "center", gap: 4, marginTop: 4 }}
-          >
-            <Ionicons name="alert-circle" size={14} color="#ef4444" />
-            <Text style={{ fontSize: 12, color: "#ef4444" }}>Tap to retry</Text>
-          </TouchableOpacity>
         ) : null}
 
         {/* Mark as answer star (acceptor only) */}
@@ -427,6 +410,47 @@ function MessageItemInner({
           </TouchableOpacity>
         ) : null}
       </View>
+
+      {/* Meta line — outside the bubble, and only under the last message of a
+          run, so a burst of messages doesn't repeat the same timestamp. */}
+      {msg.sendFailed ? (
+        <TouchableOpacity
+          onPress={() => onRetry(msg)}
+          style={{
+            flexDirection: "row",
+            alignItems: "center",
+            gap: 4,
+            marginTop: 3,
+            paddingHorizontal: 4,
+          }}
+        >
+          <Ionicons name="alert-circle" size={13} color="#ef4444" />
+          <Text style={{ fontSize: 11, color: "#ef4444" }}>Tap to retry</Text>
+        </TouchableOpacity>
+      ) : isGroupEnd ? (
+        <View
+          style={{
+            flexDirection: "row",
+            alignItems: "center",
+            gap: 4,
+            marginTop: 3,
+            paddingHorizontal: 4,
+          }}
+        >
+          <Text style={{ fontSize: 11, color: metaColor }}>
+            {formatMessageTime(msg.sentAt)}
+          </Text>
+          {isOwn ? (
+            msg.isSending ? (
+              <Ionicons name="time-outline" size={12} color={metaColor} />
+            ) : msg.isSeen ? (
+              <Ionicons name="checkmark-done" size={13} color={primaryColor} />
+            ) : msg.isDelivered ? (
+              <Ionicons name="checkmark" size={13} color={metaColor} />
+            ) : null
+          ) : null}
+        </View>
+      ) : null}
     </View>
   );
 }
