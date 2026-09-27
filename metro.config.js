@@ -19,7 +19,42 @@ const config = getDefaultConfig(__dirname);
 const netInfoStubPath = path.resolve(__dirname, "lib/netinfo-stub.js");
 const baseResolveRequest = config.resolver.resolveRequest;
 
+// ─────────────────────────────────────────────────────────────────────────────
+// The installable web app (PWA): this app exported for the browser and served
+// by questioncall.com at `/app`. Where the phone leans on something a browser
+// does not have, the web bundle — and only the web bundle — gets a stand-in
+// from `web/`. Nothing else in the app knows the web build exists.
+// `expo-router/entry-classic` is how `web/entry.ts` runs ahead of the router
+// (package.json `main` never reaches this resolver).
+// ─────────────────────────────────────────────────────────────────────────────
+const webRoot = path.resolve(__dirname, "web");
+const WEB_STAND_INS = {
+  "@/lib/google-signin": "google-signin.ts",
+  "@/lib/push-notifications": "push-notifications.ts",
+  "@livekit/react-native": "livekit.tsx",
+  "@sentry/react-native": "sentry.ts",
+  "expo-file-system/legacy": "file-system.ts",
+  "expo-local-authentication": "local-authentication.ts",
+  "expo-notifications": "notifications.ts",
+  "expo-router/entry-classic": "entry.ts",
+  "expo-screen-capture": "screen-capture.ts",
+  "expo-secure-store": "secure-store.ts",
+  "livekit-client": "livekit-client.ts",
+  "react-native-callkeep": "callkeep.ts",
+  "react-native-webview": "webview.tsx",
+};
+
 config.resolver.resolveRequest = (context, moduleName, platform) => {
+  if (
+    platform === "web" &&
+    WEB_STAND_INS[moduleName] &&
+    !context.originModulePath.startsWith(webRoot)
+  ) {
+    return {
+      filePath: path.join(webRoot, WEB_STAND_INS[moduleName]),
+      type: "sourceFile",
+    };
+  }
   if (moduleName === "@react-native-community/netinfo") {
     return { filePath: netInfoStubPath, type: "sourceFile" };
   }

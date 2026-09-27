@@ -2,6 +2,9 @@
 module.exports = {
   content: ["./app/**/*.{js,jsx,ts,tsx}", "./components/**/*.{js,jsx,ts,tsx}"],
   presets: [require("nativewind/preset")],
+  // The PWA follows the app's own light/dark/system choice (web/appearance.ts
+  // puts `dark` on <html>), not the browser's. Native builds never see this.
+  ...(process.env.EXPO_PWA === "1" && { darkMode: "class" }),
   theme: {
     extend: {
       colors: {

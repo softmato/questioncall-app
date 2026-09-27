@@ -1,0 +1,334 @@
+<!DOCTYPE html>
+<html lang="%LANG_ISO_CODE%">
+  <head>
+    <meta charset="utf-8" />
+    <meta httpEquiv="X-UA-Compatible" content="IE=edge" />
+    <!-- viewport-fit=cover: the installed app draws under the notch, and the safe-area insets pad it back. -->
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <title>%WEB_TITLE%</title>
+    <!-- One manifest for the whole site (questioncall-web app/manifest.ts); it starts here, at /app. -->
+    <link rel="manifest" href="/manifest.webmanifest" />
+    <link rel="apple-touch-icon" href="/apple-icon.png" />
+    <link rel="icon" href="/icon.png" />
+    <!-- The app's background, so the status and navigation bars disappear into it. web/appearance.ts keeps it in step with the app's theme. -->
+    <meta name="theme-color" content="#ffffff" media="(prefers-color-scheme: light)" />
+    <meta name="theme-color" content="#1c1917" media="(prefers-color-scheme: dark)" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="default" />
+    <meta name="apple-mobile-web-app-title" content="QuestionCall" />
+    <style id="expo-reset">
+      html,
+      body {
+        height: 100%;
+      }
+      body {
+        overflow: hidden;
+        background: var(--background);
+      }
+      /* global.css darkens by the browser's scheme; the app picks its own (web/appearance.ts sets .dark), so light wins unless it is chosen. */
+      html:not(.dark) {
+        --background: #ffffff;
+        --foreground: #1c1917;
+        --card: #ffffff;
+        --card-foreground: #1c1917;
+        --popover: #ffffff;
+        --popover-foreground: #1c1917;
+        --primary: #0A8A4B;
+        --primary-foreground: #ffffff;
+        --secondary: #f4f4f5;
+        --secondary-foreground: #18181b;
+        --muted: #f5f5f4;
+        --muted-foreground: #78716c;
+        --accent: #f4f4f5;
+        --accent-foreground: #18181b;
+        --destructive: #ef4444;
+        --border: #e5e5e5;
+        --input: #e5e5e5;
+        --ring: #0A8A4B;
+      }
+      /* Match the phone. NativeWind sizes text in rem, and on the phone a rem is 14px, not the browser's 16px. */
+      html {
+        font-size: 14px;
+      }
+      /* Yoga never shrinks a view or text unless told to; CSS does by default. Zero specificity, so any class or style that asks to shrink still wins. */
+      :where(#root [dir]) {
+        flex-shrink: 0;
+      }
+      #root {
+        display: flex;
+        height: 100%;
+        flex: 1;
+      }
+      /* It is a phone app. On a wide screen it stays phone-shaped rather than stretching a tab bar across a monitor. */
+      @media (min-width: 640px) {
+        #root {
+          max-width: 480px;
+          margin: 0 auto;
+          box-shadow: 0 0 0 1px var(--border);
+        }
+      }
+
+      /* The install and notification sheets: the app's bottom sheet, drawn by the shell so the app code knows nothing of it. */
+      .pwa-sheet[hidden], .pwa-call[hidden] { display: none; }
+      .pwa-sheet {
+        position: fixed; inset: 0; z-index: 2147483000; display: flex; align-items: flex-end; justify-content: center;
+        background: rgba(0, 0, 0, 0.4); font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+        animation: pwa-fade 160ms ease-out;
+      }
+      .pwa-sheet .sheet {
+        width: 100%; max-width: 480px; box-sizing: border-box; background: var(--card); color: var(--foreground);
+        border-radius: 24px 24px 0 0; padding: 10px 20px calc(20px + env(safe-area-inset-bottom));
+        animation: pwa-rise 220ms cubic-bezier(0.2, 0.8, 0.2, 1);
+      }
+      .pwa-sheet .handle { width: 40px; height: 4px; border-radius: 2px; background: var(--border); margin: 0 auto 16px; }
+      .pwa-sheet h2 { margin: 0 0 16px; font-size: 18px; font-weight: 600; }
+      .pwa-sheet .app { display: flex; align-items: center; gap: 12px; }
+      .pwa-sheet .app img, .pwa-sheet .app i { flex: none; width: 52px; height: 52px; border-radius: 14px; }
+      .pwa-sheet .app i { display: grid; place-items: center; color: var(--primary); background: color-mix(in srgb, var(--primary) 10%, transparent); }
+      .pwa-sheet .app b { display: block; font-size: 16px; font-weight: 500; }
+      .pwa-sheet .app span { font-size: 14px; color: var(--muted-foreground); }
+      .pwa-sheet ol { list-style: none; margin: 20px 0 0; padding: 0; display: grid; gap: 12px; }
+      .pwa-sheet li { display: flex; align-items: center; gap: 12px; font-size: 14px; font-weight: 500; }
+      .pwa-sheet li i {
+        flex: none; width: 40px; height: 40px; border-radius: 12px; display: grid; place-items: center; color: var(--primary);
+        background: color-mix(in srgb, var(--primary) 10%, transparent);
+      }
+      .pwa-sheet button {
+        margin-top: 20px; width: 100%; height: 48px; border: 0; border-radius: 12px; background: var(--primary); color: #fff;
+        font: 600 16px system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; display: flex; align-items: center; justify-content: center; gap: 8px;
+      }
+      .pwa-sheet button.later { margin-top: 8px; background: transparent; color: var(--muted-foreground); }
+
+      /* Alert.alert (web/alert.ts): the phone's dialog. */
+      .pwa-alert {
+        position: fixed; inset: 0; z-index: 2147483200; display: grid; place-items: center; padding: 24px;
+        background: rgba(0, 0, 0, 0.45); font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+        animation: pwa-fade 140ms ease-out;
+      }
+      .pwa-alert > div {
+        width: 100%; max-width: 340px; box-sizing: border-box; padding: 24px 24px 12px; border-radius: 24px;
+        background: var(--card); color: var(--foreground); animation: pwa-pop 180ms cubic-bezier(0.2, 0.8, 0.2, 1);
+      }
+      .pwa-alert h2 { margin: 0; font-size: 18px; font-weight: 600; }
+      .pwa-alert p { margin: 12px 0 0; font-size: 15px; line-height: 1.45; color: var(--muted-foreground); white-space: pre-line; }
+      .pwa-alert > div > div { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 4px; margin-top: 16px; }
+      .pwa-alert button {
+        border: 0; background: transparent; color: var(--primary); padding: 10px 12px; border-radius: 10px;
+        font: 600 15px system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+      }
+      .pwa-alert button:active { background: color-mix(in srgb, var(--primary) 10%, transparent); }
+      .pwa-alert button[data-destructive] { color: var(--destructive); }
+
+      /* The incoming-call screen (web/callkeep.ts): the phone's full-screen ringing UI. */
+      .pwa-call {
+        position: fixed; inset: 0; z-index: 2147483100; display: flex; flex-direction: column; align-items: center; justify-content: space-between;
+        padding: calc(72px + env(safe-area-inset-top)) 24px calc(56px + env(safe-area-inset-bottom));
+        background: linear-gradient(160deg, #0d1b2a, #1a1a2e 55%, #0f0c29); color: #fff;
+        font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; animation: pwa-fade 200ms ease-out;
+      }
+      .pwa-call .who { display: flex; flex-direction: column; align-items: center; gap: 12px; text-align: center; }
+      .pwa-call .avatar {
+        width: 112px; height: 112px; border-radius: 50%; display: grid; place-items: center; font-size: 44px; font-weight: 600;
+        background: rgba(255, 255, 255, 0.12); box-shadow: 0 0 0 0 rgba(10, 138, 75, 0.6); animation: pwa-ring 1.6s infinite;
+      }
+      .pwa-call b { font-size: 26px; font-weight: 600; }
+      .pwa-call span { font-size: 15px; color: rgba(255, 255, 255, 0.7); }
+      .pwa-call .actions { display: flex; gap: 96px; }
+      .pwa-call button {
+        width: 68px; height: 68px; border-radius: 50%; border: 0; display: grid; place-items: center; color: #fff;
+      }
+      .pwa-call [data-decline] { background: #ef4444; }
+      .pwa-call [data-answer] { background: #0A8A4B; animation: pwa-nudge 1.2s ease-in-out infinite; }
+      .pwa-call label { display: block; margin-top: 10px; text-align: center; font-size: 13px; color: rgba(255, 255, 255, 0.75); }
+
+      @keyframes pwa-fade { from { opacity: 0; } }
+      @keyframes pwa-rise { from { transform: translateY(100%); } }
+      @keyframes pwa-pop { from { opacity: 0; transform: scale(0.94); } }
+      @keyframes pwa-ring { 70% { box-shadow: 0 0 0 28px rgba(10, 138, 75, 0); } 100% { box-shadow: 0 0 0 0 rgba(10, 138, 75, 0); } }
+      @keyframes pwa-nudge { 50% { transform: translateY(-6px); } }
+    </style>
+  </head>
+
+  <body>
+    <noscript>You need to enable JavaScript to run this app.</noscript>
+    <div id="root"></div>
+
+    <div id="call" class="pwa-call" role="dialog" aria-modal="true" aria-labelledby="call-name" hidden>
+      <div class="who">
+        <div class="avatar" data-initial></div>
+        <b id="call-name" data-name></b>
+        <span data-kind></span>
+      </div>
+      <div class="actions">
+        <div>
+          <button type="button" data-decline aria-label="Decline">
+            <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="transform:rotate(135deg)"><path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72c.13.96.36 1.9.7 2.81a2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45c.91.34 1.85.57 2.81.7A2 2 0 0 1 22 16.92z"/></svg>
+          </button>
+          <label>Decline</label>
+        </div>
+        <div>
+          <button type="button" data-answer aria-label="Accept">
+            <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72c.13.96.36 1.9.7 2.81a2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45c.91.34 1.85.57 2.81.7A2 2 0 0 1 22 16.92z"/></svg>
+          </button>
+          <label>Accept</label>
+        </div>
+      </div>
+    </div>
+
+    <div id="install" class="pwa-sheet" hidden>
+      <div class="sheet" role="dialog" aria-modal="true" aria-labelledby="install-title">
+        <div class="handle"></div>
+        <h2 id="install-title">Install QuestionCall</h2>
+        <div class="app">
+          <img src="/icon.png" alt="" />
+          <div><b>QuestionCall</b><span>Opens full screen from your home screen, like any app.</span></div>
+        </div>
+        <ol data-ios hidden>
+          <li>
+            <i><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 12v8a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-8"/><polyline points="16 6 12 2 8 6"/><line x1="12" x2="12" y1="2" y2="15"/></svg></i>
+            Tap Share in the browser bar
+          </li>
+          <li>
+            <i><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="18" height="18" x="3" y="3" rx="2"/><path d="M8 12h8"/><path d="M12 8v8"/></svg></i>
+            Choose Add to Home Screen, then Add
+          </li>
+        </ol>
+        <button type="button" data-action>
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" data-android><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" x2="12" y1="15" y2="3"/></svg>
+          <span>Install app</span>
+        </button>
+        <button type="button" class="later" data-later>Not now</button>
+      </div>
+    </div>
+
+    <div id="notify" class="pwa-sheet" hidden>
+      <div class="sheet" role="dialog" aria-modal="true" aria-labelledby="notify-title">
+        <div class="handle"></div>
+        <h2 id="notify-title">Turn on notifications</h2>
+        <div class="app">
+          <i><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.268 21a2 2 0 0 0 3.464 0"/><path d="M3.262 15.326A1 1 0 0 0 4 17h16a1 1 0 0 0 .74-1.673C19.41 13.956 18 12.499 18 8A6 6 0 0 0 6 8c0 4.499-1.411 5.956-2.738 7.326"/></svg></i>
+          <div><b>Answers, messages and calls</b><span>Know when your question is answered, a message arrives or someone calls.</span></div>
+        </div>
+        <button type="button" data-action>Turn on notifications</button>
+        <button type="button" class="later" data-later>Not now</button>
+      </div>
+    </div>
+
+    <script>
+      /*
+       * The app's service worker: the site's /sw.js at scope /app. It makes the app
+       * installable and usable offline, and carries its push notifications.
+       */
+      if ("serviceWorker" in navigator) {
+        addEventListener("load", function () {
+          navigator.serviceWorker.register("/sw.js", { scope: "/app" }).catch(function () {});
+        });
+      }
+
+      /* One sheet at a time: a second waits until the first is closed. */
+      var sheetQueue = [];
+      function show(el) {
+        if (document.querySelector(".pwa-sheet:not([hidden])")) {
+          if (sheetQueue.indexOf(el) < 0) sheetQueue.push(el);
+        } else {
+          el.hidden = false;
+        }
+      }
+      function hide(el) {
+        el.hidden = true;
+        var next = sheetQueue.shift();
+        if (next) next.hidden = false;
+      }
+
+      /*
+       * Offers to put the app on the home screen, the same on Android and iPhone.
+       * Android's browser hands over its install prompt, which "Install app" fires.
+       * iPhone has no install API, only Share → Add to Home Screen, so the sheet shows
+       * those two steps. Hidden once installed; "Not now" is remembered; `?install`
+       * (the website's Install button) opens it regardless.
+       */
+      (function () {
+        var KEY = "pwa-install-dismissed";
+        var sheet = document.getElementById("install");
+        var installed = matchMedia("(display-mode: standalone)").matches || navigator.standalone === true;
+        var ios =
+          /iPhone|iPad|iPod/i.test(navigator.userAgent) ||
+          (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
+        var dismissed = false;
+        try { dismissed = localStorage.getItem(KEY) === "1"; } catch (e) {}
+        var wanted = /[?&]install(=|&|$)/.test(location.search) || !dismissed;
+        var prompt = null;
+
+        function close() {
+          hide(sheet);
+          try { localStorage.setItem(KEY, "1"); } catch (e) {}
+        }
+
+        sheet.addEventListener("click", function (event) { if (event.target === sheet) close(); });
+        sheet.querySelector("[data-later]").addEventListener("click", close);
+        sheet.querySelector("[data-action]").addEventListener("click", function () {
+          if (prompt) prompt.prompt();
+          prompt = null;
+          close();
+        });
+        addEventListener("appinstalled", function () { if (!sheet.hidden) hide(sheet); });
+
+        if (installed) return;
+
+        if (ios) {
+          sheet.querySelector("[data-ios]").hidden = false;
+          sheet.querySelector("[data-android]").remove();
+          sheet.querySelector("[data-action] span").textContent = "Got it";
+          sheet.querySelector("[data-later]").remove();
+          if (wanted) show(sheet);
+          return;
+        }
+
+        addEventListener("beforeinstallprompt", function (event) {
+          event.preventDefault();
+          prompt = event;
+          if (wanted) show(sheet);
+        });
+      })();
+
+      /*
+       * Asks for notifications once, when the app first opens signed in (push needs
+       * an account): web/push-notifications.ts raises `pwa-ask-notifications` after
+       * boot, so this never covers the splash. Browsers show their permission prompt
+       * only for a tap (iPhone strictly so), so the sheet's button is that tap. A grant
+       * is announced to the app, which subscribes straight away. iPhone offers push
+       * only to the app on the Home Screen, so a Safari tab never sees this.
+       */
+      (function () {
+        var KEY = "pwa-notify-asked";
+        var sheet = document.getElementById("notify");
+        var asked = false;
+        try { asked = localStorage.getItem(KEY) === "1"; } catch (e) {}
+        var supported = "Notification" in window && "serviceWorker" in navigator && "PushManager" in window;
+
+        if (asked || !supported) return;
+
+        function close() {
+          hide(sheet);
+          try { localStorage.setItem(KEY, "1"); } catch (e) {}
+        }
+
+        sheet.addEventListener("click", function (event) { if (event.target === sheet) close(); });
+        sheet.querySelector("[data-later]").addEventListener("click", close);
+        sheet.querySelector("[data-action]").addEventListener("click", function () {
+          close();
+          Notification.requestPermission().then(function (permission) {
+            if (permission === "granted") dispatchEvent(new Event("pwa-notifications-granted"));
+          });
+        });
+
+        addEventListener("pwa-ask-notifications", function () {
+          var stillAsked = false;
+          try { stillAsked = localStorage.getItem(KEY) === "1"; } catch (e) {}
+          if (!stillAsked && Notification.permission === "default") show(sheet);
+        });
+      })();
+    </script>
+  </body>
+</html>
