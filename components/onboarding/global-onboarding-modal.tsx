@@ -15,6 +15,7 @@ import { OnboardingVideoPlayer } from "@/components/onboarding/onboarding-video-
 import { useAppDispatch, useAppSelector } from "@/hooks/redux";
 import { api } from "@/lib/api";
 import { useAppTheme } from "@/hooks/use-app-theme";
+import { useCallUi } from "@/lib/call-ui-store";
 import {
   markOnboardingSeen,
   setOnboardingDismissing,
@@ -24,8 +25,10 @@ import { updateUser } from "@/store/slices/userSlice";
 
 export function GlobalOnboardingModal() {
   const { shouldShow, video } = useAppSelector((s) => s.onboarding);
+  // Own window above the call overlay — see GlobalNoticeModal.
+  const inCall = useCallUi().params !== null;
 
-  if (!shouldShow || !video) return null;
+  if (!shouldShow || !video || inCall) return null;
 
   return <OnboardingModalBody video={video} />;
 }

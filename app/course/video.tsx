@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { StatusBar, Text, TouchableOpacity, View } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
+import { useEvent } from "expo";
 import { router, useLocalSearchParams } from "expo-router";
 import { useVideoPlayer, VideoView } from "expo-video";
 
@@ -56,6 +57,12 @@ export default function CourseVideoScreen() {
 
   const player = useVideoPlayer(videoSrc ?? "", (p) => {
     p.loop = false;
+  });
+
+  // Without this a failed load is just ExoPlayer's grey "broken" icon, with
+  // no hint of why (network, DNS, codec, 403…).
+  const { error: playbackError } = useEvent(player, "statusChange", {
+    status: player.status,
   });
 
   const sendProgressPing = useCallback(async () => {
@@ -139,6 +146,23 @@ export default function CourseVideoScreen() {
         ) : (
           <Text className="text-base text-white/60">Loading video...</Text>
         )}
+        {videoSrc && playbackError ? (
+          <View className="absolute inset-0 items-center justify-center bg-black px-8">
+            <Ionicons name="alert-circle-outline" size={40} color="#ef4444" />
+            <Text className="mt-3 text-center text-base font-semibold text-white">
+              This video couldn&apos;t play.
+            </Text>
+            <Text className="mt-1 text-center text-xs text-white/60">
+              {playbackError.message}
+            </Text>
+            <TouchableOpacity
+              onPress={() => void player.replaceAsync(videoSrc)}
+              className="mt-4 rounded-full bg-white/20 px-6 py-2.5"
+            >
+              <Text className="font-semibold text-white">Try again</Text>
+            </TouchableOpacity>
+          </View>
+        ) : null}
       </View>
 
       {isPreview ? (

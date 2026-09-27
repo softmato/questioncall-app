@@ -15,6 +15,7 @@ import Toast from "react-native-toast-message";
 import { useAppDispatch, useAppSelector } from "@/hooks/redux";
 import { api } from "@/lib/api";
 import { useAppTheme } from "@/hooks/use-app-theme";
+import { useCallUi } from "@/lib/call-ui-store";
 import { InlineVideo } from "@/components/media/inline-video";
 import { NoticeImage } from "@/components/notices/notice-media";
 import { dismissNoticeLocally, setActiveNotice } from "@/store/slices/noticesSlice";
@@ -37,6 +38,9 @@ export function GlobalNoticeModal() {
   const { list, activeNoticeId } = useAppSelector((s) => s.notices);
   const user = useAppSelector((s) => s.user.data);
   const [isDismissing, setIsDismissing] = useState(false);
+  // An RN Modal is its own window, stacked above the root-level call overlay:
+  // it would swallow every tap on Accept/Decline/End. Hold it until the call ends.
+  const inCall = useCallUi().params !== null;
 
   const notice = useMemo(
     () => list.find((item) => item._id === activeNoticeId) ?? null,
@@ -70,7 +74,7 @@ export function GlobalNoticeModal() {
 
   return (
     <Modal
-      visible={Boolean(notice)}
+      visible={Boolean(notice) && !inCall}
       transparent
       animationType="fade"
       onRequestClose={() => dispatch(setActiveNotice(null))}

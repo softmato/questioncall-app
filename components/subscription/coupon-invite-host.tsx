@@ -16,6 +16,7 @@ import Toast from "react-native-toast-message";
 import { useAppSelector } from "@/hooks/redux";
 import { useAppTheme } from "@/hooks/use-app-theme";
 import { api } from "@/lib/api";
+import { useCallUi } from "@/lib/call-ui-store";
 import { getRequestErrorMessage } from "@/lib/server-response";
 import { openWebCheckout } from "@/lib/web-checkout";
 import { store } from "@/store";
@@ -75,6 +76,9 @@ export function CouponInviteHost() {
   const [coupon, setCoupon] = useState<EligibleCoupon | null>(null);
   const [isActivating, setIsActivating] = useState(false);
   const checkedForUserRef = useRef<string | null>(null);
+  // Its banner (zIndex 999) sits above the call overlay and its Modal is its
+  // own window: neither may cover a call's controls.
+  const inCall = useCallUi().params !== null;
 
   const check = useCallback(async () => {
     if (!isAuthenticated || role !== "STUDENT") return;
@@ -183,7 +187,7 @@ export function CouponInviteHost() {
     }
   }, [coupon]);
 
-  if (!coupon) return null;
+  if (!coupon || inCall) return null;
 
   const planLabel = coupon.planName ?? coupon.planSlug?.toUpperCase() ?? "premium";
   const headline =

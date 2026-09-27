@@ -22,16 +22,19 @@ export const CALL_ROOM_OPTIONS: RoomOptions = {
   adaptiveStream: false,
   dynacast: false,
 
-  // Matches VideoPresets.h1080.resolution. Inlined rather than imported
-  // because pulling the value would mean a runtime import of livekit-client
-  // (see note above). Treated as `ideal` by getUserMedia, so devices that
-  // can't do 1080p degrade to their closest supported capture format.
+  // Matches VideoPresets.h720.resolution, inlined rather than imported because
+  // pulling the value would mean a runtime import of livekit-client (see note
+  // above). NOT the web's 1080p: this client only runs on phones, and libwebrtc
+  // has no hardware VP8 encoder for MediaTek chips (the Helio in the Infinix
+  // test phone and most budget Androids), so 1080p30 is software-encoded while
+  // the peer's 1080p is decoded — enough to starve the JS thread, which is
+  // "the call plays but mute/camera/end do nothing".
   videoCaptureDefaults: {
     resolution: {
-      width: 1920,
-      height: 1080,
+      width: 1280,
+      height: 720,
       frameRate: 30,
-      aspectRatio: 1920 / 1080,
+      aspectRatio: 1280 / 720,
     },
   },
 
@@ -39,20 +42,17 @@ export const CALL_ROOM_OPTIONS: RoomOptions = {
     // 1:1 call with one subscriber that always wants the top layer. Extra
     // simulcast layers cost uplink + encoder CPU and buy us nothing.
     simulcast: false,
-    videoEncoding: { maxBitrate: 3_000_000, maxFramerate: 30 },
-    // Default for sub-1080p capture is 'balanced', which resolves CPU or
-    // bandwidth pressure by downscaling and is slow to climb back. We would
-    // rather hold resolution and lose some smoothness — students hold written
-    // work up to the camera, so legibility beats framerate.
-    degradationPreference: "maintain-resolution",
+    videoEncoding: { maxBitrate: 1_700_000, maxFramerate: 30 },
+    // degradationPreference deliberately unset: livekit-client then uses
+    // 'balanced' for a sub-1080p camera (on a phone the pressure is CPU, and
+    // holding resolution under CPU overuse is what froze the call UI) and
+    // 'maintain-resolution' for screen share, where legibility is the point.
 
     // Screen share is a different signal from a camera feed and needs its own
     // ceiling. Without this key it inherits videoEncoding above, which was
-    // tuned for a 1080p camera at 30fps; a shared phone screen is taller,
-    // sharper, and mostly static text, so it wants the bitrate headroom far
-    // more than it wants the framerate. maintain-resolution for the same reason
-    // it is set above, and more so: a downscaled screen share is unreadable,
-    // which is the entire point of sharing one.
+    // tuned for a camera at 30fps; a shared phone screen is taller, sharper,
+    // and mostly static text, so it wants the bitrate headroom far more than it
+    // wants the framerate.
     screenShareEncoding: { maxBitrate: 4_000_000, maxFramerate: 15 },
   },
 };

@@ -153,13 +153,11 @@ export function PersistentCallHost() {
     <View style={styles.root} pointerEvents={minimized ? "box-none" : "auto"}>
       <GestureDetector gesture={pan}>
         <Animated.View style={[styles.surface, surfaceStyle]}>
-          <Pressable
-            style={styles.fill}
-            disabled={!minimized}
-            onPress={expandCall}
-            accessibilityRole="button"
-            accessibilityLabel={minimized ? "Return to call" : undefined}
-          >
+          {/* A plain View, not a Pressable: a Pressable around the whole call
+              UI is `accessible`, which folds Accept/Decline/End into one
+              TalkBack element, and it sat in the touch path of every call
+              control. The bubble's tap target is the sibling below. */}
+          <View style={styles.fill}>
             <CallScreen
               key={instance}
               roomId={params.roomId}
@@ -169,7 +167,17 @@ export function PersistentCallHost() {
               minimized={minimized}
               canMinimize={canMinimize}
             />
-          </Pressable>
+          </View>
+          {minimized ? (
+            // After <CallScreen/>, so toggling it never shifts the call's
+            // position in the tree (see the CRITICAL note above).
+            <Pressable
+              style={StyleSheet.absoluteFill}
+              onPress={expandCall}
+              accessibilityRole="button"
+              accessibilityLabel="Return to call"
+            />
+          ) : null}
         </Animated.View>
       </GestureDetector>
     </View>

@@ -892,13 +892,16 @@ export function CallScreen({
         if (!skipTracks) {
           await startCallAudio(isVideo ? "VIDEO" : "AUDIO", speakerOn);
           tracksEnabledRef.current = true;
-          await room.localParticipant.enableCameraAndMicrophone();
-          setTracksPublished(true);
-
-          if (!isVideo) {
-            await room.localParticipant.setCameraEnabled(false);
+          // Voice calls never open the camera — publishing it and switching it
+          // off afterwards lit the camera and ran the video encoder on every
+          // voice call.
+          if (isVideo) {
+            await room.localParticipant.enableCameraAndMicrophone();
+          } else {
+            await room.localParticipant.setMicrophoneEnabled(true);
             setCamEnabled(false);
           }
+          setTracksPublished(true);
 
           const localVideoPub = room.localParticipant.getTrackPublication(
             Track.Source.Camera,
@@ -976,12 +979,13 @@ export function CallScreen({
     (async () => {
       try {
         await startCallAudio(isVideo ? "VIDEO" : "AUDIO", speakerOn);
-        await room.localParticipant.enableCameraAndMicrophone();
-        setTracksPublished(true);
-        if (!isVideo) {
-          await room.localParticipant.setCameraEnabled(false);
+        if (isVideo) {
+          await room.localParticipant.enableCameraAndMicrophone();
+        } else {
+          await room.localParticipant.setMicrophoneEnabled(true);
           setCamEnabled(false);
         }
+        setTracksPublished(true);
         const localVideoPub = room.localParticipant.getTrackPublication(
           Track.Source.Camera,
         );
