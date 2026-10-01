@@ -1,4 +1,4 @@
-import { Appearance, Linking } from "react-native";
+import { Appearance, Linking, Platform } from "react-native";
 import Toast from "react-native-toast-message";
 
 import { api } from "@/lib/api";
@@ -6,7 +6,12 @@ import { store } from "@/store";
 import { setUser } from "@/store/slices/userSlice";
 import { setConfig } from "@/store/slices/configSlice";
 
-const RETURN_URL = "questioncall://payment/return";
+// The PWA's checkout popup can only hand back a page on its own origin
+// (web/payment-return.ts); the server allowlists both (isAppReturnUrl).
+const RETURN_URL =
+  Platform.OS === "web"
+    ? `${window.location.origin}/app/payment/return`
+    : "questioncall://payment/return";
 
 export type CheckoutIntent = "subscription" | "course" | "chapter";
 
@@ -41,6 +46,7 @@ export async function openWebCheckout(
       intent,
       ref,
       coupon: options?.coupon ?? undefined,
+      returnUrl: RETURN_URL,
     });
     url = data?.url;
     if (!url) throw new Error("No checkout url");
@@ -65,6 +71,12 @@ export async function openWebCheckout(
     const WebBrowser = await import("expo-web-browser");
     result = await WebBrowser.openAuthSessionAsync(url, RETURN_URL);
   } catch (error) {
+    // A browser blocks the popup when the tap is too long ago. Go to checkout
+    // in this window instead; it comes back to app/payment/return.tsx.
+    if (Platform.OS === "web") {
+      window.location.assign(url);
+      return;
+    }
     console.warn("[checkout] Falling back to Linking.openURL:", error);
     try {
       await Linking.openURL(url);

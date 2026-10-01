@@ -12,5 +12,6 @@
 import "./appearance";
 import "./alert";
 import "./form-data";
+import "./payment-return";
 
 import "expo-router/entry-classic";

@@ -16,6 +16,17 @@ ringtone.loop = true;
 const screen = () => document.getElementById("call");
 
 function stop(callUUID?: string) {
+  // The push may have rung this call in the tray too (public/sw.js tags it
+  // `call-<id>`); answered, declined or ended here, it must not linger there.
+  const id = callUUID ?? ringing;
+  if (id) {
+    void navigator.serviceWorker
+      ?.getRegistration("/app")
+      .then((registration) => registration?.getNotifications({ tag: `call-${id}` }))
+      .then((notifications) => notifications?.forEach((n) => n.close()))
+      .catch(() => {});
+  }
+
   if (callUUID && callUUID !== ringing) return;
   ringing = null;
   ringtone.pause();
