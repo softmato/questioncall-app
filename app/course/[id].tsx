@@ -1,3 +1,4 @@
+import { formatDuration } from "@/lib/duration";
 import {
   Component,
   useCallback,
@@ -77,15 +78,6 @@ type CourseDetail = Course & {
   instructorFollowerCount?: number;
   [key: string]: unknown;
 };
-
-function formatDuration(minutes?: number | null) {
-  if (!minutes || minutes <= 0) return "Flexible";
-  if (minutes < 60) return `${minutes} min`;
-
-  const hours = Math.floor(minutes / 60);
-  const remaining = minutes % 60;
-  return remaining > 0 ? `${hours}h ${remaining}m` : `${hours}h`;
-}
 
 function formatCompactCount(value?: number | null) {
   if (!value || value <= 0) return "0";
@@ -664,7 +656,7 @@ function CourseDetailScreenContent() {
               }}
             >
               <Text style={{ color: palette.muted, fontSize: 12, fontWeight: "700" }}>
-                {totalSections} sections
+                {totalSections} section{totalSections === 1 ? "" : "s"}
               </Text>
             </View>
             <TouchableOpacity
@@ -996,6 +988,8 @@ function CourseDetailScreenContent() {
               flexDirection: "row",
               alignItems: "baseline",
               justifyContent: "space-between",
+              flexWrap: "wrap",
+              gap: 8,
               marginTop: 26,
               marginHorizontal: 2,
               marginBottom: 12,
@@ -1005,7 +999,8 @@ function CourseDetailScreenContent() {
               Course content
             </Text>
             <Text style={{ color: palette.muted, fontSize: 13, fontWeight: "700" }}>
-              {totalVideos} lessons - {formatDuration(activeCourse.totalDurationMinutes)}
+              {totalVideos} lesson{totalVideos === 1 ? "" : "s"} -{" "}
+              {formatDuration(activeCourse.totalDurationMinutes)}
             </Text>
           </View>
 

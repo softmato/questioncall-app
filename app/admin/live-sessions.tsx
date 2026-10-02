@@ -1,3 +1,4 @@
+import { formatDuration } from "@/lib/duration";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   View,
@@ -140,7 +141,7 @@ export default function AdminLiveSessionsScreen() {
             </Text>
             {item.durationMinutes ? (
               <Text className="text-[12px] text-muted-foreground">
-                {item.durationMinutes} min
+                {formatDuration(item.durationMinutes)}
               </Text>
             ) : null}
           </View>

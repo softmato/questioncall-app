@@ -1,3 +1,4 @@
+import { formatDuration } from "@/lib/duration";
 import {
   View,
   Text,
@@ -47,15 +48,6 @@ function pricingLabel(model: Course["pricingModel"]) {
     return { text: "Subscription", color: "#0ea5e9" };
   // Play Store compliance: neutral badge instead of a price for paid digital goods.
   return { text: "Premium", color: "#f59e0b" };
-}
-
-function formatDuration(minutes?: number | null) {
-  if (!minutes || minutes <= 0) return "Flexible";
-  if (minutes < 60) return `${minutes} min`;
-
-  const hours = Math.floor(minutes / 60);
-  const remaining = minutes % 60;
-  return remaining > 0 ? `${hours}h ${remaining}m` : `${hours}h`;
 }
 
 function formatCompactCount(value?: number | null) {

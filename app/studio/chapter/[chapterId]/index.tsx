@@ -1,3 +1,4 @@
+import { formatDuration } from "@/lib/duration";
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   ActivityIndicator,
@@ -482,7 +483,7 @@ export default function ManageChapterScreen() {
                   <Text style={{ marginTop: 3, fontSize: 12, color: mutedIconColor }}>
                     {item.type === "VIDEO"
                       ? item.status === "READY"
-                        ? `${item.durationMinutes ?? 0} min · ${item.viewCount ?? 0} views`
+                        ? `${formatDuration(item.durationMinutes)} · ${item.viewCount ?? 0} views`
                         : item.status
                       : `${item.fileType ?? "Document"} · ${formatBytes(item.fileSizeBytes)}`}
                   </Text>

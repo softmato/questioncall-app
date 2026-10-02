@@ -1,3 +1,4 @@
+import { formatDuration } from "@/lib/duration";
 import { useCallback, useEffect, useState } from "react";
 import {
   ActivityIndicator,
@@ -222,7 +223,7 @@ export default function StudioScreen() {
           <View style={{ flexDirection: "row", alignItems: "center", gap: 4 }}>
             <Ionicons name="time-outline" size={14} color={mutedIconColor} />
             <Text style={{ fontSize: 12, color: mutedIconColor }}>
-              {item.totalDurationMinutes} min
+              {formatDuration(item.totalDurationMinutes)}
             </Text>
           </View>
         ) : null}

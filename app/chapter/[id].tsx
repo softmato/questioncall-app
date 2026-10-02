@@ -1,3 +1,4 @@
+import { formatDuration } from "@/lib/duration";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   ActivityIndicator,
@@ -343,7 +344,7 @@ export default function ChapterDetailScreen() {
                       {item.status !== "READY"
                         ? item.status
                         : item.type === "VIDEO"
-                          ? `${item.durationMinutes ?? 0} min`
+                          ? `${formatDuration(item.durationMinutes)}`
                           : item.fileName || item.fileType || "Document"}
                     </Text>
                     {preview && !hasAccess ? (

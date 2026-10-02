@@ -1,11 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { StatusBar, Text, TouchableOpacity, View } from "react-native";
+import { Platform, StatusBar, Text, TouchableOpacity, View } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
 import { useEvent } from "expo";
 import { router, useLocalSearchParams } from "expo-router";
 import { useVideoPlayer, VideoView } from "expo-video";
 
 import { api } from "@/lib/api";
+import CourseWebPlayer from "@/components/course-web-player";
 
 const PROGRESS_PING_INTERVAL_MS = 10_000;
 
@@ -41,7 +42,12 @@ export default function CourseVideoScreen() {
         const res = await api.get(`/courses/${courseId}/videos/${videoId}`);
         const d = res.data;
         // Prefer web-constructed playbackUrl which already includes Mux logic
-        const src = d.playbackUrl ?? d.muxPlaybackId ?? d.videoUrl ?? d.url ?? null;
+        const src =
+          d.playbackUrl ??
+          (d.muxPlaybackId ? `https://stream.mux.com/${d.muxPlaybackId}.m3u8` : null) ??
+          d.videoUrl ??
+          d.url ??
+          null;
         if (!src) {
           setError("Video URL not available");
           return;
@@ -55,9 +61,12 @@ export default function CourseVideoScreen() {
     })();
   }, [courseId, videoId, videoSrc]);
 
-  const player = useVideoPlayer(videoSrc ?? "", (p) => {
-    p.loop = false;
-  });
+  const player = useVideoPlayer(
+    Platform.OS === "web" ? null : (videoSrc ?? null),
+    (p) => {
+      p.loop = false;
+    },
+  );
 
   // Without this a failed load is just ExoPlayer's grey "broken" icon, with
   // no hint of why (network, DNS, codec, 403…).
@@ -135,7 +144,15 @@ export default function CourseVideoScreen() {
 
       {/* Video player */}
       <View className="flex-1 items-center justify-center">
-        {videoSrc ? (
+        {videoSrc && Platform.OS === "web" ? (
+          <CourseWebPlayer
+            source={videoSrc}
+            onProgress={(seconds) => {
+              watchedSecondsRef.current = Math.floor(seconds);
+              void sendProgressPing();
+            }}
+          />
+        ) : videoSrc ? (
           <VideoView
             player={player}
             style={{ width: "100%", height: "100%" }}
@@ -146,7 +163,7 @@ export default function CourseVideoScreen() {
         ) : (
           <Text className="text-base text-white/60">Loading video...</Text>
         )}
-        {videoSrc && playbackError ? (
+        {Platform.OS !== "web" && videoSrc && playbackError ? (
           <View className="absolute inset-0 items-center justify-center bg-black px-8">
             <Ionicons name="alert-circle-outline" size={40} color="#ef4444" />
             <Text className="mt-3 text-center text-base font-semibold text-white">

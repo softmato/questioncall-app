@@ -1,3 +1,4 @@
+import { formatDuration } from "@/lib/duration";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   ActivityIndicator,
@@ -121,14 +122,6 @@ function formatLastActive(isOnline: boolean, lastActiveAt: string | null) {
   if (hours < 24) return `Active ${hours}h ago`;
   const days = Math.floor(hours / 24);
   return `Active ${days}d ago`;
-}
-
-function formatDuration(minutes?: number | null) {
-  if (!minutes || minutes <= 0) return "Flexible";
-  if (minutes < 60) return `${minutes} min`;
-  const hours = Math.floor(minutes / 60);
-  const remaining = minutes % 60;
-  return remaining > 0 ? `${hours}h ${remaining}m` : `${hours}h`;
 }
 
 function formatCompactCount(value?: number | null) {
