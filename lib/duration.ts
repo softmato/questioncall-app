@@ -23,5 +23,14 @@ export function formatDuration(minutes?: number | null): string {
   const seconds = Math.max(0, durationSeconds(minutes));
   const wholeMinutes = Math.floor(seconds / 60);
   const remaining = seconds % 60;
+  if (wholeMinutes >= 60) {
+    const hours = Math.floor(wholeMinutes / 60);
+    const minutesLeft = wholeMinutes % 60;
+    return [
+      `${hours}h`,
+      ...(minutesLeft ? [`${minutesLeft}m`] : []),
+      ...(remaining ? [`${remaining}s`] : []),
+    ].join(" ");
+  }
   return remaining ? `${wholeMinutes}m ${remaining}s` : `${wholeMinutes} min`;
 }
