@@ -60,3 +60,7 @@ app-example
 # and `expo start` refuses to serve a manifest to the dev client.
 /android
 /ios
+
+# local build/lint timing logs and export checks
+.duration-*.log
+/.pwa-video-check/
