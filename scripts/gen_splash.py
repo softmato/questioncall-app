@@ -25,8 +25,8 @@ ICON_SRC = "D:/Jiwan-Mijhar/app/assets/images/icon.png"
 OUT = "D:/Jiwan-Mijhar/app/assets/images/splash-logo.png"
 
 CANVAS_W = 1024
-# Width of the icon's coloured pixels on the canvas. At CANVAS_W = 1024 and an
-# `imageWidth` of 280dp this renders the icon 144dp wide.
+# Width of the icon's coloured pixels on the canvas. Designed at an `imageWidth`
+# of 280dp (icon 144dp wide); app.json now draws it at 210dp — 75%, icon 108dp.
 ICON_INK_W = 528
 # Icon ink to wordmark cap-height. Reads as ~18dp on screen.
 GAP = 66
@@ -36,7 +36,7 @@ PAD = 60
 
 FONT = "C:/Windows/Fonts/segoeuib.ttf"
 FONT_SIZE = 62
-TEXT = "Question Call"
+TEXT = "QuestionCall"
 TEXT_COLOR = (28, 28, 28)
 BACKGROUND = (255, 255, 255)
 

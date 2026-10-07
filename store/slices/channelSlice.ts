@@ -27,6 +27,8 @@ export interface ChatMessage {
   localId?: string;
   isSending?: boolean;
   sendFailed?: boolean;
+  /** A pending send's file, kept so a retry can upload it (mediaUrl is its local uri). */
+  localMedia?: { name: string; mimeType: string; size?: number };
 }
 
 export interface ChannelDetail {

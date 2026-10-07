@@ -17,6 +17,8 @@ import {
   View,
 } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
+import * as DocumentPicker from "expo-document-picker";
+import * as FileSystem from "expo-file-system/legacy";
 import * as ImagePicker from "expo-image-picker";
 import { Audio } from "expo-av";
 import { router, useLocalSearchParams } from "expo-router";
@@ -102,6 +104,21 @@ function formatMessageDate(iso: string) {
     year: "numeric",
   });
 }
+
+type OutgoingMedia = {
+  kind: "IMAGE" | "VIDEO" | "DOCUMENT" | "AUDIO";
+  uri: string;
+  name: string;
+  mimeType: string;
+  size?: number;
+};
+
+const DEFAULT_MIME: Record<OutgoingMedia["kind"], string> = {
+  IMAGE: "image/jpeg",
+  VIDEO: "video/mp4",
+  AUDIO: "audio/m4a",
+  DOCUMENT: "application/pdf",
+};
 
 export default function WorkspaceScreen() {
   const { channelId } = useLocalSearchParams<{ channelId: string }>();
@@ -480,147 +497,193 @@ export default function WorkspaceScreen() {
     }
   };
 
-  // ─── Take photo with camera ────────────────────────────────────
-  const handleOpenCamera = async () => {
-    if (!isActive) return;
+  // ─── Send a photo, video or document ──────────────────────────
+  // Images go through /upload; a video goes straight to Mux and a document to
+  // R2, as on the website — both are far over the server's request-size limit.
+  const uploadChatMedia = async (media: OutgoingMedia): Promise<string> => {
+    if (media.kind === "VIDEO") {
+      const { data } = await api.post("/chat-upload/video", { channelId });
+      const put = await FileSystem.createUploadTask(data.uploadUrl, media.uri, {
+        httpMethod: "PUT",
+        uploadType: FileSystem.FileSystemUploadType.BINARY_CONTENT,
+        headers: { "Content-Type": media.mimeType },
+      }).uploadAsync();
+      if (!put || put.status < 200 || put.status >= 300) {
+        throw new Error("Video upload failed");
+      }
+      for (let attempt = 0; attempt < 60; attempt++) {
+        await new Promise((resolve) => setTimeout(resolve, attempt < 5 ? 2000 : 5000));
+        const res = await api.get(`/chat-upload/video/${data.uploadId}/status`);
+        if (res.data?.status === "ready" && res.data.playbackUrl)
+          return res.data.playbackUrl;
+        if (res.data?.status === "errored") throw new Error("Video processing failed");
+      }
+      throw new Error("Video processing timed out");
+    }
+
+    if (media.kind === "DOCUMENT") {
+      const { data } = await api.post("/upload/presign", {
+        filename: media.name,
+        contentType: media.mimeType,
+        fileSize: media.size,
+        folder: "chat",
+      });
+      const put = await FileSystem.createUploadTask(data.uploadUrl, media.uri, {
+        httpMethod: "PUT",
+        uploadType: FileSystem.FileSystemUploadType.BINARY_CONTENT,
+        headers: { "Content-Type": media.mimeType },
+      }).uploadAsync();
+      if (!put || put.status < 200 || put.status >= 300) {
+        throw new Error("Document upload failed");
+      }
+      return data.publicUrl;
+    }
+
+    const form = new FormData();
+    form.append("file", {
+      uri: media.uri,
+      name: media.name,
+      type: media.mimeType,
+    } as unknown as Blob);
+    const res = await api.post("/upload", form, {
+      headers: { "Content-Type": "multipart/form-data" },
+      timeout: 30000,
+    });
+    return res.data?.secure_url ?? res.data?.url;
+  };
+
+  const sendMedia = async (media: OutgoingMedia) => {
+    const localId = `local_media_${Date.now()}`;
+    // The website sends a document's file name as its text; so does this.
+    const content = media.kind === "DOCUMENT" ? media.name : "";
+    const optimistic: ChatMessage = {
+      id: localId,
+      localId,
+      channelId: channelId!,
+      senderId: userId!,
+      senderName: "You",
+      content,
+      mediaUrl: media.uri,
+      mediaType: media.kind,
+      isSystemMessage: false,
+      isOwn: true,
+      isSeen: false,
+      isDelivered: false,
+      isMarkedAsAnswer: false,
+      isDeleted: false,
+      sentAt: new Date().toISOString(),
+      isSending: true,
+      localMedia: { name: media.name, mimeType: media.mimeType, size: media.size },
+    };
+    dispatch(addPendingMessage(optimistic));
+
+    try {
+      const mediaUrl = await uploadChatMedia(media);
+      const res = await api.post(`/channels/${channelId}/messages`, {
+        content: content || undefined,
+        mediaUrl,
+        mediaType: media.kind,
+      });
+      dispatch(
+        resolvePendingMessage({
+          localId,
+          message: { ...(res.data as ChatMessage), isOwn: true, isDelivered: true },
+        }),
+      );
+      dequeueMessage(localId).catch(() => {});
+    } catch (err: any) {
+      dispatch(failPendingMessage(localId));
+      enqueueFailedMessage(optimistic).catch(() => {});
+      Toast.show({
+        type: "error",
+        // e.g. the server's list of document types it accepts
+        text2: err?.response?.data?.error,
+        text1:
+          media.kind === "VIDEO"
+            ? "Failed to send video"
+            : media.kind === "DOCUMENT"
+              ? "Failed to send document"
+              : media.kind === "AUDIO"
+                ? "Failed to send voice message"
+                : "Failed to send photo",
+      });
+    }
+  };
+
+  // System pickers background the app; keep the foreground refetch quiet.
+  const withSystemDialog = async <T,>(open: () => Promise<T>): Promise<T> => {
     suppressForegroundRefetchRef.current = true;
-    const permission = await ImagePicker.requestCameraPermissionsAsync();
-    suppressForegroundRefetchRef.current = false;
+    try {
+      return await open();
+    } finally {
+      suppressForegroundRefetchRef.current = false;
+    }
+  };
+
+  const sendPickedAsset = (asset: ImagePicker.ImagePickerAsset) => {
+    const isVideo = asset.type === "video";
+    void sendMedia({
+      kind: isVideo ? "VIDEO" : "IMAGE",
+      uri: asset.uri,
+      name: asset.fileName ?? `chat-${Date.now()}.${isVideo ? "mp4" : "jpg"}`,
+      mimeType: asset.mimeType ?? (isVideo ? "video/mp4" : "image/jpeg"),
+    });
+  };
+
+  const handleOpenCamera = async () => {
+    const permission = await withSystemDialog(() =>
+      ImagePicker.requestCameraPermissionsAsync(),
+    );
     if (!permission.granted) {
       Toast.show({ type: "error", text1: "Camera permission required." });
       return;
     }
-    suppressForegroundRefetchRef.current = true;
-    const result = await ImagePicker.launchCameraAsync({
-      mediaTypes: ["images", "videos"],
-      quality: 0.85,
-    });
-    suppressForegroundRefetchRef.current = false;
-    if (result.canceled || !result.assets[0]) return;
-
-    const asset = result.assets[0];
-    const isVideo = asset.type === "video";
-    const localId = `local_cam_${Date.now()}`;
-    const optimistic: ChatMessage = {
-      id: localId,
-      localId,
-      channelId: channelId!,
-      senderId: userId!,
-      senderName: "You",
-      content: "",
-      mediaUrl: asset.uri,
-      mediaType: isVideo ? "VIDEO" : "image",
-      isSystemMessage: false,
-      isOwn: true,
-      isSeen: false,
-      isDelivered: false,
-      isMarkedAsAnswer: false,
-      isDeleted: false,
-      sentAt: new Date().toISOString(),
-      isSending: true,
-    };
-    dispatch(addPendingMessage(optimistic));
-
-    try {
-      const form = new FormData();
-      form.append("file", {
-        uri: asset.uri,
-        name: asset.fileName ?? `cam-${Date.now()}.${isVideo ? "mp4" : "jpg"}`,
-        type: asset.mimeType ?? (isVideo ? "video/mp4" : "image/jpeg"),
-      } as unknown as Blob);
-      const uploadRes = await api.post("/upload", form, {
-        headers: { "Content-Type": "multipart/form-data" },
-        timeout: 60000,
-      });
-      const mediaUrl = uploadRes.data?.secure_url ?? uploadRes.data?.url;
-
-      const res = await api.post(`/channels/${channelId}/messages`, {
-        mediaUrl,
-        mediaType: isVideo ? "VIDEO" : "IMAGE",
-      });
-      dispatch(
-        resolvePendingMessage({
-          localId,
-          message: { ...(res.data as ChatMessage), isOwn: true, isDelivered: true },
-        }),
-      );
-      dequeueMessage(localId).catch(() => {});
-    } catch {
-      dispatch(failPendingMessage(localId));
-      enqueueFailedMessage(optimistic).catch(() => {});
-      Toast.show({ type: "error", text1: "Failed to send photo" });
-    }
+    const result = await withSystemDialog(() =>
+      ImagePicker.launchCameraAsync({ mediaTypes: ["images", "videos"], quality: 0.85 }),
+    );
+    if (!result.canceled && result.assets[0]) sendPickedAsset(result.assets[0]);
   };
 
-  // ─── Send image ────────────────────────────────────────────────
-  const handlePickImage = async () => {
-    if (!isActive) return;
-    suppressForegroundRefetchRef.current = true;
-    const permission = await ImagePicker.requestMediaLibraryPermissionsAsync();
-    suppressForegroundRefetchRef.current = false;
+  const handlePickFromGallery = async () => {
+    const permission = await withSystemDialog(() =>
+      ImagePicker.requestMediaLibraryPermissionsAsync(),
+    );
     if (!permission.granted) {
       Toast.show({ type: "error", text1: "Photo library permission required." });
       return;
     }
-    suppressForegroundRefetchRef.current = true;
-    const result = await ImagePicker.launchImageLibraryAsync({
-      mediaTypes: ["images"],
-      quality: 0.85,
+    const result = await withSystemDialog(() =>
+      ImagePicker.launchImageLibraryAsync({
+        mediaTypes: ["images", "videos"],
+        quality: 0.85,
+      }),
+    );
+    if (!result.canceled && result.assets[0]) sendPickedAsset(result.assets[0]);
+  };
+
+  const handlePickDocument = async () => {
+    const result = await withSystemDialog(() =>
+      DocumentPicker.getDocumentAsync({ copyToCacheDirectory: true }),
+    );
+    const doc = !result.canceled ? result.assets[0] : null;
+    if (!doc) return;
+    void sendMedia({
+      kind: "DOCUMENT",
+      uri: doc.uri,
+      name: doc.name,
+      mimeType: doc.mimeType ?? "application/octet-stream",
+      size: doc.size,
     });
-    suppressForegroundRefetchRef.current = false;
-    if (result.canceled || !result.assets[0]) return;
+  };
 
-    const asset = result.assets[0];
-    const localId = `local_img_${Date.now()}`;
-    const optimistic: ChatMessage = {
-      id: localId,
-      localId,
-      channelId: channelId!,
-      senderId: userId!,
-      senderName: "You",
-      content: "",
-      mediaUrl: asset.uri,
-      mediaType: "image",
-      isSystemMessage: false,
-      isOwn: true,
-      isSeen: false,
-      isDelivered: false,
-      isMarkedAsAnswer: false,
-      isDeleted: false,
-      sentAt: new Date().toISOString(),
-      isSending: true,
-    };
-    dispatch(addPendingMessage(optimistic));
-
-    try {
-      const form = new FormData();
-      form.append("file", {
-        uri: asset.uri,
-        name: asset.fileName ?? `chat-${Date.now()}.jpg`,
-        type: asset.mimeType ?? "image/jpeg",
-      } as unknown as Blob);
-      const uploadRes = await api.post("/upload", form, {
-        headers: { "Content-Type": "multipart/form-data" },
-        timeout: 30000,
-      });
-      const mediaUrl = uploadRes.data?.secure_url ?? uploadRes.data?.url;
-
-      const res = await api.post(`/channels/${channelId}/messages`, {
-        mediaUrl,
-        mediaType: "IMAGE",
-      });
-      dispatch(
-        resolvePendingMessage({
-          localId,
-          message: { ...(res.data as ChatMessage), isOwn: true, isDelivered: true },
-        }),
-      );
-      dequeueMessage(localId).catch(() => {});
-    } catch {
-      dispatch(failPendingMessage(localId));
-      enqueueFailedMessage(optimistic).catch(() => {});
-      Toast.show({ type: "error", text1: "Failed to send image" });
-    }
+  const handleAttach = () => {
+    if (!isActive) return;
+    Alert.alert("Attach", undefined, [
+      { text: "Camera", onPress: () => void handleOpenCamera() },
+      { text: "Photo or video", onPress: () => void handlePickFromGallery() },
+      { text: "Document", onPress: () => void handlePickDocument() },
+      { text: "Cancel", style: "cancel" },
+    ]);
   };
 
   // ─── Mark as answer (teacher only) ─────────────────────────────
@@ -721,8 +784,19 @@ export default function WorkspaceScreen() {
         const payload: Record<string, string> = {};
         if (msg.content) payload.content = msg.content;
         if (msg.mediaUrl) {
-          payload.mediaUrl = msg.mediaUrl;
-          payload.mediaType = msg.mediaType ?? "image";
+          const kind = (msg.mediaType?.toUpperCase() ?? "IMAGE") as OutgoingMedia["kind"];
+          // A failed send never uploaded its file; posting the local path made a
+          // message the other person could not open.
+          payload.mediaUrl = /^https?:\/\//.test(msg.mediaUrl)
+            ? msg.mediaUrl
+            : await uploadChatMedia({
+                kind,
+                uri: msg.mediaUrl,
+                name: msg.localMedia?.name ?? `chat-${Date.now()}`,
+                mimeType: msg.localMedia?.mimeType ?? DEFAULT_MIME[kind],
+                size: msg.localMedia?.size,
+              });
+          payload.mediaType = kind;
         }
         const res = await api.post(`/channels/${channelId}/messages`, payload);
         dispatch(
@@ -736,6 +810,7 @@ export default function WorkspaceScreen() {
         dispatch(failPendingMessage(msg.localId));
       }
     },
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- uploadChatMedia only reads channelId
     [channelId, dispatch],
   );
 
@@ -863,57 +938,12 @@ export default function WorkspaceScreen() {
 
   const sendVoiceMessage = async (audioUri: string) => {
     if (!isActive) return;
-    const localId = `local_audio_${Date.now()}`;
-    const optimistic: ChatMessage = {
-      id: localId,
-      localId,
-      channelId: channelId!,
-      senderId: userId!,
-      senderName: "You",
-      content: "",
-      mediaUrl: audioUri,
-      mediaType: "AUDIO",
-      isSystemMessage: false,
-      isOwn: true,
-      isSeen: false,
-      isDelivered: false,
-      isMarkedAsAnswer: false,
-      isDeleted: false,
-      sentAt: new Date().toISOString(),
-      isSending: true,
-    };
-    dispatch(addPendingMessage(optimistic));
-
-    try {
-      const form = new FormData();
-      form.append("file", {
-        uri: audioUri,
-        name: `voice-${Date.now()}.m4a`,
-        type: "audio/m4a",
-      } as unknown as Blob);
-      const uploadRes = await api.post("/upload", form, {
-        headers: { "Content-Type": "multipart/form-data" },
-        timeout: 30000,
-      });
-      const mediaUrl = uploadRes.data?.secure_url ?? uploadRes.data?.url;
-
-      const res = await api.post(`/channels/${channelId}/messages`, {
-        mediaUrl,
-        mediaType: "AUDIO",
-      });
-      dispatch(
-        resolvePendingMessage({
-          localId,
-          message: { ...(res.data as ChatMessage), isOwn: true, isDelivered: true },
-        }),
-      );
-      dequeueMessage(localId).catch(() => {});
-      Toast.show({ type: "success", text1: "Voice message sent" });
-    } catch {
-      dispatch(failPendingMessage(localId));
-      enqueueFailedMessage(optimistic).catch(() => {});
-      Toast.show({ type: "error", text1: "Failed to send voice message" });
-    }
+    await sendMedia({
+      kind: "AUDIO",
+      uri: audioUri,
+      name: `voice-${Date.now()}.m4a`,
+      mimeType: DEFAULT_MIME.AUDIO,
+    });
   };
 
   // ─── Start call ───────────────────────────────────────────────
@@ -1631,9 +1661,10 @@ export default function WorkspaceScreen() {
           ) : (
             /* ── Normal input — matches screenshot: + | input | mic circle ── */
             <View style={{ flexDirection: "row", alignItems: "flex-end", gap: 10 }}>
-              {/* + button (gallery + camera) */}
+              {/* + button (camera, gallery, document) */}
               <TouchableOpacity
-                onPress={handlePickImage}
+                onPress={handleAttach}
+                accessibilityLabel="Attach a photo, video or document"
                 style={{
                   width: 38,
                   height: 38,

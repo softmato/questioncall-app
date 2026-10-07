@@ -31,6 +31,8 @@ const webRoot = path.resolve(__dirname, "web");
 const WEB_STAND_INS = {
   "@/lib/google-signin": "google-signin.ts",
   "@/lib/push-notifications": "push-notifications.ts",
+  "@/components/calls/persistent-call-host": "persistent-call-host.tsx",
+  "@/lib/livekit-runtime": "call-chunk.ts",
   "@livekit/react-native": "livekit.tsx",
   "@sentry/react-native": "sentry.ts",
   "expo-file-system/legacy": "file-system.ts",

@@ -1,0 +1,3 @@
+# Local compile output and Gradle's per-project cache. Not source.
+build/
+.gradle/

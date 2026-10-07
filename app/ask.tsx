@@ -38,6 +38,7 @@ import {
   removeQuestion,
   unmarkOptimistic,
 } from "@/store/slices/feedSlice";
+import { updateUser } from "@/store/slices/userSlice";
 import { useAppTheme } from "@/hooks/use-app-theme";
 import { useFilterOptions } from "@/hooks/use-filter-options";
 import {
@@ -411,6 +412,8 @@ function StudentAskScreen() {
       dispatch(removeQuestion(tempId));
       dispatch(prependQuestion(created));
       dispatch(addMyQuestion(created));
+      // The server counted it; keep the "questions left" pill in step.
+      dispatch(updateUser({ questionsAsked: quotaUsed + 1 }));
 
       // Reset
       setTitle("");
@@ -431,8 +434,8 @@ function StudentAskScreen() {
       const status = err?.response?.status;
       const apiMessage = err?.response?.data?.error ?? err?.response?.data?.message;
       const message =
-        status === 401 && pendingImages.length > 0
-          ? "Image upload isn't enabled for the mobile app yet. Try posting without images."
+        status === 401
+          ? "Your session has expired. Please sign in again."
           : (apiMessage ?? "Failed to post question.");
       Toast.show({ type: "error", text1: message });
     } finally {

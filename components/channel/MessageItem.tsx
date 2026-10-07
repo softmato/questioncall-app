@@ -1,6 +1,14 @@
 import React, { useState, useRef, useEffect, useCallback } from "react";
-import { View, Text, TouchableOpacity, Image, ActivityIndicator } from "react-native";
+import {
+  View,
+  Text,
+  TouchableOpacity,
+  Image,
+  ActivityIndicator,
+  Linking,
+} from "react-native";
 import { Ionicons } from "@expo/vector-icons";
+import { InlineVideo } from "@/components/media/inline-video";
 import { Audio } from "expo-av";
 import { hasAnyActiveCall } from "@/lib/active-call";
 import type { ChatMessage } from "@/store/slices/channelSlice";
@@ -319,6 +327,10 @@ function MessageItemInner({
 
   // Answer-marked overlay
   const isMarked = !!msg.isMarkedAsAnswer;
+  // Optimistic sends have used a lowercase "image"; the server sends uppercase.
+  const mediaType = msg.mediaType?.toUpperCase() ?? null;
+  // The web sends a document's file name as its text, shown on the file row.
+  const isDocument = mediaType === "DOCUMENT" && !!msg.mediaUrl;
 
   return (
     <View
@@ -350,7 +362,7 @@ function MessageItemInner({
         }}
       >
         {/* Image */}
-        {msg.mediaUrl && msg.mediaType === "IMAGE" ? (
+        {msg.mediaUrl && mediaType === "IMAGE" ? (
           <TouchableOpacity
             onPress={() => onImageOpen(msg.mediaUrl!)}
             style={{ marginBottom: 6 }}
@@ -363,8 +375,36 @@ function MessageItemInner({
           </TouchableOpacity>
         ) : null}
 
+        {/* Video (answers recorded or uploaded on either platform) */}
+        {msg.mediaUrl && mediaType === "VIDEO" ? (
+          <View style={{ marginBottom: msg.content ? 6 : 0 }}>
+            <InlineVideo uri={msg.mediaUrl} width={220} height={160} />
+          </View>
+        ) : null}
+
+        {/* Document */}
+        {isDocument ? (
+          <TouchableOpacity
+            onPress={() => Linking.openURL(msg.mediaUrl!).catch(() => {})}
+            style={{ flexDirection: "row", alignItems: "center", gap: 8 }}
+          >
+            <Ionicons name="document-text-outline" size={22} color={textColor} />
+            <Text
+              numberOfLines={2}
+              style={{
+                flexShrink: 1,
+                fontSize: 14,
+                color: textColor,
+                textDecorationLine: "underline",
+              }}
+            >
+              {msg.content || "Open document"}
+            </Text>
+          </TouchableOpacity>
+        ) : null}
+
         {/* Audio */}
-        {msg.mediaType === "AUDIO" && msg.mediaUrl ? (
+        {mediaType === "AUDIO" && msg.mediaUrl ? (
           <AudioMessagePlayer
             mediaUrl={msg.mediaUrl}
             onAccent={!isOwn}
@@ -374,7 +414,7 @@ function MessageItemInner({
         ) : null}
 
         {/* Text */}
-        {msg.content ? (
+        {msg.content && !isDocument ? (
           <Text style={{ fontSize: 15, lineHeight: 22, color: textColor }}>
             {msg.content}
           </Text>

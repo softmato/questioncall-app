@@ -3,7 +3,7 @@
 // which is not available in React Native's Hermes engine. Polyfill it here
 // before any LiveKit code runs to prevent "Property 'Event' doesn't exist".
 import { useCallback, useEffect } from "react";
-import { Appearance, AppState, AppStateStatus } from "react-native";
+import { Appearance, AppState, AppStateStatus, Linking } from "react-native";
 import { Stack, router } from "expo-router";
 import { Provider } from "react-redux";
 import { PersistGate } from "redux-persist/integration/react";
@@ -28,6 +28,7 @@ import {
   type AppNotification,
 } from "@/store/slices/notificationsSlice";
 import { api, SECURE_STORE_KEYS } from "@/lib/api";
+import { getLaunchUrl, signInFromHostelPalika } from "@/lib/hostelpalika-sign-in";
 import { Sprint2Bootstrap } from "@/components/sprint2/sprint2-bootstrap";
 import { GlobalNoticeModal } from "@/components/notices/global-notice-modal";
 import { GlobalOnboardingModal } from "@/components/onboarding/global-onboarding-modal";
@@ -52,8 +53,9 @@ import {
   rejectCall,
 } from "@/lib/full-screen-call-notification";
 import { stopOngoingCallService } from "@/lib/ongoing-call-service";
+import { resolveNotificationRoute } from "@/lib/notification-route";
 
-import { BrandSplash } from "@/components/branding/brand-splash";
+import { BrandSplash, releaseBootSplash } from "@/components/branding/brand-splash";
 import { GlobalUploadOverlay } from "@/components/sprint2/global-upload-overlay";
 import { PersistentCallHost } from "@/components/calls/persistent-call-host";
 import { CouponInviteHost } from "@/components/subscription/coupon-invite-host";
@@ -98,36 +100,6 @@ try {
 // user cannot swipe it away themselves. Sweep it before the UI comes up.
 stopOngoingCallService();
 
-// Maps web-style hrefs sent in push notification payloads to valid mobile routes.
-// Falls back to the feed tab for anything unrecognised.
-function resolveNotificationRoute(href: string): string {
-  // Routes that already match mobile paths — pass through
-  if (href.startsWith("/workspace/")) return href;
-  if (href.startsWith("/call/")) return href;
-  if (href.startsWith("/course/")) return href;
-  if (href.startsWith("/quiz/")) return href;
-  if (href.startsWith("/studio/")) return href;
-  if (href.startsWith("/wallet/")) return href;
-  if (href.startsWith("/profile/")) return href;
-  if (href.startsWith("/settings/")) return href;
-  if (href.startsWith("/daily-target/")) return href;
-  if (href.startsWith("/payment/")) return href;
-
-  // Exact web routes → best mobile equivalent
-  if (href === "/wallet") return "/wallet/index";
-  if (href === "/subscription") return "/payment/plans";
-  if (href === "/settings") return "/settings/notifications";
-  if (href === "/profile") return "/profile/index";
-  if (href === "/notifications") return "/notifications";
-  if (href === "/leaderboard") return "/leaderboard";
-  if (href === "/referral") return "/referral";
-  if (href === "/notices") return "/notices";
-  if (href === "/notes") return "/notes";
-  if (href === "/channels") return "/(tabs)/channels";
-  if (href === "/daily-target") return "/daily-target/index";
-
-  return "/(tabs)/feed";
-}
 SplashScreen.preventAutoHideAsync();
 
 const sentryDsn = process.env.EXPO_PUBLIC_SENTRY_DSN;
@@ -219,6 +191,9 @@ function AppInitializer({ children }: { children: React.ReactNode }) {
       if (accessToken && refreshToken) {
         store.dispatch(setTokens({ accessToken, refreshToken }));
         isAuthed = true;
+      } else if (await signInFromHostelPalika(store.dispatch, await getLaunchUrl())) {
+        // Opened from HostelPalika: signed in under the splash, no landing flash.
+        isAuthed = true;
       } else {
         store.dispatch(clearAuth());
       }
@@ -231,6 +206,7 @@ function AppInitializer({ children }: { children: React.ReactNode }) {
       // while the UI is already visible and interactive.
       store.dispatch(setAuthLoading(false));
       SplashScreen.hideAsync();
+      releaseBootSplash();
     }
 
     void fetchPlatformConfig();
@@ -294,6 +270,11 @@ function AppInitializer({ children }: { children: React.ReactNode }) {
     }, HEARTBEAT_MS);
 
     const subscription = AppState.addEventListener("change", handleAppStateChange);
+    // Already running, signed out, when HostelPalika opens us again.
+    const linkSub = Linking.addEventListener("url", ({ url }) => {
+      if (store.getState().auth.isAuthenticated) return;
+      void signInFromHostelPalika(store.dispatch, url);
+    });
     const receivedSub = addNotificationReceivedListener((notification) => {
       console.log(
         "[push] ★ Notification RECEIVED:",
@@ -356,6 +337,7 @@ function AppInitializer({ children }: { children: React.ReactNode }) {
     return () => {
       clearInterval(heartbeat);
       subscription.remove();
+      linkSub.remove();
       receivedSub.remove();
       notificationSub.remove();
     };
@@ -456,10 +438,9 @@ function RootLayout() {
                 <CouponInviteHost />
                 <GlobalUploadOverlay />
                 <Toast />
-                {/* Continues the native splash in JS so the "Powered by
-                    Softmato" lockup can sit at the bottom — expo-splash-screen
-                    can only draw one centred image. Last child, so it covers
-                    everything until it fades itself out. */}
+                {/* The launch screen where the native one is missing (the PWA,
+                    older builds); renders nothing on Android. Last child, so it
+                    covers everything until it fades itself out. */}
                 <BrandSplash />
               </AppInitializer>
             </GestureHandlerRootView>

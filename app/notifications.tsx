@@ -14,6 +14,7 @@ import { router, useFocusEffect } from "expo-router";
 import { useAppDispatch, useAppSelector } from "@/hooks/redux";
 import { useAppTheme } from "@/hooks/use-app-theme";
 import { api } from "@/lib/api";
+import { resolveNotificationRoute } from "@/lib/notification-route";
 import {
   markAllRead,
   markNotificationRead,
@@ -150,7 +151,7 @@ export default function NotificationsCenterScreen() {
         });
       }
       if (item.href) {
-        router.push(item.href as any);
+        router.push(resolveNotificationRoute(item.href) as any);
       }
     },
     [dispatch],

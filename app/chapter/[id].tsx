@@ -3,9 +3,9 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   ActivityIndicator,
   Image,
-  Linking,
   RefreshControl,
   ScrollView,
+  Share,
   StatusBar,
   Text,
   TouchableOpacity,
@@ -17,7 +17,7 @@ import Toast from "react-native-toast-message";
 
 import { useAppSelector } from "@/hooks/redux";
 import { useAppTheme } from "@/hooks/use-app-theme";
-import { api } from "@/lib/api";
+import { API_BASE_URL, api } from "@/lib/api";
 import { openWebCheckout } from "@/lib/web-checkout";
 
 type PricingModel = "FREE" | "SUBSCRIPTION_INCLUDED" | "PAID";
@@ -36,6 +36,7 @@ type ChapterContent = {
 
 type ChapterDetail = {
   _id: string;
+  slug: string;
   title: string;
   description: string;
   subject: string;
@@ -416,11 +417,18 @@ export default function ChapterDetailScreen() {
         ) : null}
 
         <TouchableOpacity
-          onPress={() =>
-            Linking.openURL(`https://questioncall.com/chapters/${chapter._id}`).catch(
-              () => {},
-            )
-          }
+          onPress={() => {
+            // The website addresses chapters by slug; an id there is a 404.
+            const url = `${API_BASE_URL}/chapters/${chapter.slug}`;
+            Share.share({
+              title: chapter.title,
+              message: `${chapter.title}
+${url}`,
+              url,
+            }).catch(() =>
+              Toast.show({ type: "error", text1: "Could not open share dialog" }),
+            );
+          }}
           style={{ marginTop: 14, alignSelf: "flex-start" }}
         >
           <Text style={{ color: mutedIconColor, fontSize: 12 }}>Share link</Text>
