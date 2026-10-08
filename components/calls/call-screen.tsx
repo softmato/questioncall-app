@@ -35,7 +35,13 @@ import Animated, {
 import { api } from "@/lib/api";
 import { CALL_ROOM_OPTIONS } from "@/lib/call-room-options";
 import { useAppSelector } from "@/hooks/redux";
-import { closeCall, minimizeCall, resolveCallRoomId } from "@/lib/call-ui-store";
+import {
+  closeCall,
+  closeRingingCall,
+  minimizeCall,
+  openCall,
+  resolveCallRoomId,
+} from "@/lib/call-ui-store";
 import {
   endCallKeepCall,
   reportCallConnected,
@@ -53,7 +59,7 @@ import {
   startOngoingCallService,
   stopOngoingCallService,
 } from "@/lib/ongoing-call-service";
-import { hideFullScreenCallNotification } from "@/lib/full-screen-call-notification";
+import { stopIncomingRing } from "@/lib/full-screen-call-notification";
 import { markCallActive, clearActiveCall } from "@/lib/active-call";
 import {
   getPusherClient,
@@ -107,6 +113,22 @@ const REMOTE_LEFT_GRACE_MS = 2_000;
 // a killed app never will, and the session would otherwise sit ACTIVE for ever
 // and block every future call on the channel.
 const REMOTE_LEFT_END_MS = 12_000;
+// How long the caller rings before giving up, like any phone. Matches the 45s
+// ring on the callee's device; the server ends it at 50s if nobody does.
+const CALLER_RING_TIMEOUT_MS = 45_000;
+// Safety net under Pusher while ringing — see the ringing effect below.
+const RINGING_POLL_MS = 3_000;
+// How long "Call ended" stays up before the screen leaves on its own.
+const ENDED_AUTO_CLOSE_MS = 1_500;
+
+async function fetchCallStatus(callSessionId: string): Promise<CallStatus | null> {
+  try {
+    const res = await api.get(`/calls/${callSessionId}`);
+    return (res.data as { status?: CallStatus } | null)?.status ?? null;
+  } catch {
+    return null;
+  }
+}
 
 // Android renders each VideoView into its own SurfaceView, and SurfaceViews sit
 // outside React Native's view hierarchy — stacking order comes from these
@@ -190,18 +212,26 @@ export function CallScreen({
   useEffect(() => {
     if (!roomId) return;
     markCallActive(roomId);
-    // Once this screen is up the ringing surfaces are redundant — the user is
-    // looking at the call UI. Tearing them down here covers every entry point
-    // (accept from the notification, accept from this screen, tapping the
-    // notification body, an outgoing call) with one rule. It also stops the
-    // library's IncomingCallService, which is a *foreground* service: left
-    // running it shows its own undismissable "QuestionCall is running" entry
-    // until its 45s timeout fires.
-    hideFullScreenCallNotification();
     return () => clearActiveCall(roomId);
   }, [roomId]);
 
   const [session, setSession] = useState<CallSession | null>(null);
+
+  // Silence the native ring once the user has done something with the call:
+  // answered, declined, or it is an outgoing call. NOT while this screen is
+  // only showing an incoming call that has not been answered — silencing then
+  // (as this did on mount) left a locked phone showing Accept/Decline with no
+  // sound, and the call went unnoticed. One rule for every entry point.
+  const holdRing =
+    !session ||
+    (session.status === "RINGING" &&
+      session.callerId !== null &&
+      session.callerId !== userId &&
+      !autoAccept);
+  useEffect(() => {
+    if (!roomId || holdRing) return;
+    stopIncomingRing(roomId);
+  }, [roomId, holdRing]);
 
   // While minimized there is no "Call ended / Go back" surface — when the call
   // reaches a terminal state, drop the bubble entirely.
@@ -562,7 +592,6 @@ export function CallScreen({
   useEffect(() => {
     if (isPendingRoute) return;
     if (!routeRoomId) return;
-    hideFullScreenCallNotification();
 
     const pre = preAcceptedCallRef.current;
     if (pre) {
@@ -1123,21 +1152,14 @@ export function CallScreen({
     return () => clearInterval(t);
   }, [timerDeadline]);
 
-  // ── Pusher: listen for call lifecycle + timer events ──────────────────────
-  useEffect(() => {
-    if (!userId || !roomId) return;
-    const client = getPusherClient();
-    if (!client) return;
-
-    const userChannel = client.subscribe(getUserPusherName(userId));
-
-    // Caller-only: explain why the call wasn't answered, then bounce back to
-    // the channel list with the toast still visible. These events only reach
-    // the caller (the server emits reject/missed to the caller's channel), but
-    // we guard on callerId anyway. "declined" = they were reachable and said
-    // no; "missed" splits on presence at create time — online-but-no-pickup vs
-    // simply offline (only the push wake-up reached them).
-    const notifyUnanswered = (kind: "declined" | "missed") => {
+  // Caller-only: explain why the call wasn't answered, then bounce back to
+  // the channel list with the toast still visible. These events only reach
+  // the caller (the server emits reject/missed to the caller's channel), but
+  // we guard on callerId anyway. "declined" = they were reachable and said
+  // no; "missed" splits on presence at create time — online-but-no-pickup vs
+  // simply offline (only the push wake-up reached them).
+  const notifyUnanswered = useCallback(
+    (kind: "declined" | "missed") => {
       const s = sessionRef.current;
       if (!s || s.callerId !== userId || endingRef.current) return;
       endingRef.current = true;
@@ -1161,8 +1183,89 @@ export function CallScreen({
           text2: `${peer} isn't online right now — they'll get a missed-call notification.`,
         });
       }
-      goBack();
+      closeCall();
+    },
+    [userId],
+  );
+
+  // ── Ringing safety nets ───────────────────────────────────────────────────
+  // Pusher is the fast path for every ringing transition, and nothing backed it
+  // up: one dropped event stranded both sides — the caller rang for ever beside
+  // a callee who had already answered (or declined), and an incoming screen sat
+  // on Accept/Decline for a call the caller had abandoned. Ask the server every
+  // few seconds while ringing. And the caller gives up after
+  // CALLER_RING_TIMEOUT_MS like any phone does; nothing else ended an
+  // unanswered call, so the caller used to ring until they hung up themselves.
+  const ringingStatus = session?.status;
+  const ringingCallerId = session?.callerId;
+  useEffect(() => {
+    if (ringingStatus !== "RINGING" || !roomId || !userId) return;
+    const isCaller = ringingCallerId === userId;
+    let cancelled = false;
+
+    const apply = (status: CallStatus | null) => {
+      if (cancelled || !status || status === "RINGING" || endingRef.current) return;
+      if (status === "ACTIVE") {
+        if (isCaller) {
+          setSession((prev) =>
+            prev?.status === "RINGING" ? { ...prev, status: "ACTIVE" } : prev,
+          );
+        } else if (!acceptingRef.current) {
+          // Answered, but not by this screen: another of this user's devices.
+          // Only an unanswered incoming screen closes; an accept in flight here
+          // (acceptCall's) resolves on its own.
+          closeRingingCall(roomId);
+        }
+        return;
+      }
+      setSession((prev) => (prev ? { ...prev, status } : prev));
+      if (isCaller) {
+        notifyUnanswered(status === "REJECTED" ? "declined" : "missed");
+      } else {
+        closeRingingCall(roomId);
+      }
     };
+
+    const poll = setInterval(() => {
+      void fetchCallStatus(roomId).then(apply);
+    }, RINGING_POLL_MS);
+
+    const giveUp = isCaller
+      ? setTimeout(() => {
+          void api
+            .post(`/calls/${roomId}/missed`, { timedOutBy: "caller" })
+            .then(() => apply("MISSED"))
+            // 409: it moved on at the last moment (usually answered) — follow it.
+            .catch(() => fetchCallStatus(roomId).then(apply));
+        }, CALLER_RING_TIMEOUT_MS)
+      : null;
+
+    return () => {
+      cancelled = true;
+      clearInterval(poll);
+      if (giveUp) clearTimeout(giveUp);
+    };
+  }, [ringingStatus, ringingCallerId, roomId, userId, notifyUnanswered]);
+
+  // An ended call leaves on its own, the way a phone's call screen does,
+  // instead of waiting on "Go back".
+  const endedStatus =
+    session && session.status !== "RINGING" && session.status !== "ACTIVE"
+      ? session.status
+      : null;
+  useEffect(() => {
+    if (!endedStatus) return;
+    const t = setTimeout(() => closeCall(), ENDED_AUTO_CLOSE_MS);
+    return () => clearTimeout(t);
+  }, [endedStatus]);
+
+  // ── Pusher: listen for call lifecycle + timer events ──────────────────────
+  useEffect(() => {
+    if (!userId || !roomId) return;
+    const client = getPusherClient();
+    if (!client) return;
+
+    const userChannel = client.subscribe(getUserPusherName(userId));
 
     const handleAccepted = (payload: any) => {
       if (payload?.callSessionId !== roomId) return;
@@ -1194,7 +1297,7 @@ export function CallScreen({
       userChannel.unbind(CALL_MISSED_EVENT, handleMissed);
       userChannel.unbind(CALL_CANCELLED_EVENT, handleCancelled);
     };
-  }, [userId, roomId]);
+  }, [userId, roomId, notifyUnanswered]);
 
   // Channel-scoped Pusher for timer updates + call ended
   useEffect(() => {
@@ -1227,16 +1330,28 @@ export function CallScreen({
     return () => {
       ch.unbind(CHANNEL_TIMER_UPDATED_EVENT, handleTimerUpdate);
       ch.unbind(CALL_ENDED_EVENT, handleEnded);
-      client.unsubscribe(getChannelPusherName(chId));
+      // Unbind only. pusher-js keeps one subscription per channel name, shared
+      // with the chat screen, so unsubscribing here also cut the open chat off
+      // from new messages every time a call ended.
     };
   }, [channelId, session?.channelId, roomId]);
 
   // ── Call actions ──────────────────────────────────────────────────────────
+  // Single flight: the auto-accept effect re-runs on unrelated state changes
+  // and used to fire a second POST /accept, whose 409 showed "Couldn't accept"
+  // over a call that had connected fine.
+  const acceptingRef = useRef(false);
   const handleAccept = async () => {
-    if (!session) return;
+    if (!session || acceptingRef.current) return;
+    acceptingRef.current = true;
     setIsAccepting(true);
+    const callId = session.callSessionId;
+    stopIncomingRing(callId);
+    // Answered on this device: from here on the screen is no longer an
+    // unanswered incoming call that closeRingingCall() may dismiss.
+    openCall({ roomId: callId, autoAccept: true });
     try {
-      const res = await api.post(`/calls/${session.callSessionId}/accept`, {
+      const res = await api.post(`/calls/${callId}/accept`, {
         deviceId: getDeviceId(),
       });
       // OPT-6: Accept response includes token — store it so connectToRoom skips /token fetch
@@ -1250,15 +1365,34 @@ export function CallScreen({
           timeExtensionCount: data.timeExtensionCount ?? 0,
         };
       }
+      // Use the room realtime-bridge pre-warmed while ringing rather than
+      // opening a second connection under the same identity, which LiveKit
+      // resolves by kicking one of the two — sometimes the live one.
+      const calleePrewarm = consumeCalleePrewarm(callId);
+      if (calleePrewarm && !prewarmedRoomRef.current) {
+        prewarmedRoomRef.current = calleePrewarm.room;
+      }
       setSession((prev) => (prev ? { ...prev, status: "ACTIVE" } : prev));
       Vibration.cancel();
     } catch (err: unknown) {
-      console.error(
+      console.warn(
         "[call] Accept failed:",
         err instanceof Error ? err.message : String(err),
       );
-      Toast.show({ type: "error", text1: "Couldn't accept the call. Please try again." });
+      // Ask what actually happened instead of leaving Accept/Decline up for a
+      // call that has moved on: our own earlier request may have landed
+      // (ACTIVE — connect), or the caller hung up first (show it ended).
+      const status = await fetchCallStatus(callId);
+      if (status && status !== "RINGING") {
+        setSession((prev) => (prev ? { ...prev, status } : prev));
+      } else {
+        Toast.show({
+          type: "error",
+          text1: "Couldn't accept the call. Please try again.",
+        });
+      }
     } finally {
+      acceptingRef.current = false;
       setIsAccepting(false);
     }
   };
@@ -1267,6 +1401,7 @@ export function CallScreen({
   const handleDecline = async () => {
     if (!session) return;
     setIsDeclining(true);
+    stopIncomingRing(session.callSessionId);
     try {
       await api.post(`/calls/${session.callSessionId}/reject`, {
         deviceId: getDeviceId(),

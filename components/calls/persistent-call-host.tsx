@@ -44,6 +44,7 @@ const BUBBLE_MARGIN = 12;
 export function PersistentCallHost() {
   const { params, minimized, instance } = useCallUi();
   const isAuthenticated = useAppSelector((s) => s.auth.isAuthenticated);
+  const authLoading = useAppSelector((s) => s.auth.isLoading);
   const { width: screenW, height: screenH } = useWindowDimensions();
 
   // Bubble position (top-left of bubble), spring-settled after drags.
@@ -58,11 +59,17 @@ export function PersistentCallHost() {
 
   // Logging out mid-call must end the call — the store reset wipes the user
   // the call session belongs to.
+  //
+  // Not while auth is still loading. Tokens are not persisted in Redux, so on a
+  // cold start isAuthenticated reads false until the root layout has restored
+  // them from SecureStore — and answering from a killed app opens the call
+  // before that. This used to close every cold-start answer on sight while the
+  // accept still reached the server: the caller connected to nobody.
   useEffect(() => {
-    if (!isAuthenticated && active) {
+    if (!authLoading && !isAuthenticated && active) {
       closeCall();
     }
-  }, [isAuthenticated, active]);
+  }, [authLoading, isAuthenticated, active]);
 
   // Let the call — and only the call — display over the lock screen, for as
   // long as the call lasts. See lib/call-keyguard.ts for why this is armed

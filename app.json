@@ -112,7 +112,7 @@
       "url": "https://u.expo.dev/86d256ec-943f-49e8-adaf-659400e4edac"
     },
     "runtimeVersion": {
-      "policy": "appVersion"
+      "policy": "fingerprint"
     },
     "extra": {
       "router": {},

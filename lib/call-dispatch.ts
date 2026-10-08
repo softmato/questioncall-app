@@ -24,13 +24,18 @@ import { showFullScreenCallNotification } from "@/lib/full-screen-call-notificat
 import { isCallActive } from "@/lib/active-call";
 
 // Matches WINDOW_MS in CallDispatchStore.kt (see plugins/withCallKeep.js).
-const CALL_DEDUPE_WINDOW_MS = 30_000;
+const CALL_DEDUPE_WINDOW_MS = 60_000;
 
 const recentCallDispatches = new Map<string, number>();
 
 type CallDispatchNativeModule = {
   claimCallDispatch?: (callSessionId: string) => Promise<boolean>;
   forgetCallDispatch?: (callSessionId: string) => void;
+  ringIncomingCall?: (
+    callSessionId: string,
+    callerName: string,
+    isVideo: boolean,
+  ) => Promise<"RANG" | "HANDLED" | "FAILED">;
 };
 
 const nativeDispatch = NativeModules.CallForegroundService as
@@ -102,6 +107,26 @@ export async function surfaceIncomingCall(signal: IncomingCallSignal): Promise<b
   // without this the native call UI pops up over the live call and
   // accept/decline just bounce back to the same session.
   if (isCallActive(callSessionId)) return false;
+
+  // Android: ring through the same native code the FCM service uses, which
+  // claims, rings, and falls back to a CallStyle notification when a
+  // foreground-service start is refused — releasing the claim if nothing could
+  // be shown. Ringing from here used to go through the library's startService,
+  // which throws once the app is backgrounded (Pusher is often still connected
+  // then): the claim below was already spent, so the FCM push that followed was
+  // dropped as a duplicate and the phone never rang at all.
+  if (Platform.OS === "android" && nativeDispatch?.ringIncomingCall) {
+    try {
+      const outcome = await nativeDispatch.ringIncomingCall(
+        callSessionId,
+        callerName,
+        mode === "VIDEO",
+      );
+      return outcome === "RANG";
+    } catch {
+      return false;
+    }
+  }
 
   if (!(await claimDispatch(callSessionId))) return false;
 

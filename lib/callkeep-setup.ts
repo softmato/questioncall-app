@@ -78,8 +78,21 @@ const CALLKEEP_OPTIONS = {
   },
 };
 
+/**
+ * CallKeep is iOS-only (CallKit is the incoming-call UI there).
+ *
+ * On Android it ran self-managed with no UI of its own, and was pure liability:
+ * every RNCallKeep.endCall() — which this app calls on EVERY teardown (hangup,
+ * cancel, unmount, a duplicate accept) — fires CallKeep's own "endCall" event,
+ * and the listener below turns that into POST /reject. A ringing call whose
+ * screen was merely closed got rejected, and endCall also reset the audio mode
+ * to NORMAL in the middle of a live call. The native ringing surfaces in
+ * plugins/withCallKeep.js do everything it was standing in for.
+ */
+const USE_CALLKEEP = Platform.OS === "ios";
+
 export function setupCallKeep() {
-  if (initialized) return;
+  if (initialized || !USE_CALLKEEP) return;
   initialized = true;
 
   try {
@@ -114,10 +127,6 @@ export function setupCallKeep() {
     // User declined from system UI — fire the reject API
     void fetch_reject(callUUID);
   });
-
-  if (Platform.OS === "android") {
-    RNCallKeep.setAvailable(true);
-  }
 }
 
 export function displayIncomingCall(
@@ -125,6 +134,7 @@ export function displayIncomingCall(
   callerName: string,
   isVideo: boolean,
 ) {
+  if (!USE_CALLKEEP) return;
   if (!initialized) setupCallKeep();
 
   RNCallKeep.displayIncomingCall(
@@ -137,6 +147,7 @@ export function displayIncomingCall(
 }
 
 export function endCallKeepCall(callSessionId: string) {
+  if (!USE_CALLKEEP) return;
   try {
     RNCallKeep.endCall(callSessionId);
   } catch (err) {
@@ -148,6 +159,7 @@ export function endCallKeepCall(callSessionId: string) {
 }
 
 export function reportCallConnected(callSessionId: string) {
+  if (!USE_CALLKEEP) return;
   try {
     RNCallKeep.setCurrentCallActive(callSessionId);
   } catch (err) {

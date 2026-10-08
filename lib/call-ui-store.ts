@@ -60,14 +60,41 @@ function setState(next: CallUiState) {
  * Open (or re-focus) the call overlay. If a call is already active, this only
  * expands it — it never replaces the live call, so duplicate navigations
  * (notification tap, deep link re-delivery) are harmless.
+ *
+ * The one thing a repeat open CAN change is answering: Accept pressed on a
+ * notification while the in-app incoming screen for the same call is already
+ * up flips that screen to answer, instead of being swallowed as a duplicate.
  */
 export function openCall(params: CallUiParams) {
-  dismissCallTrayNotifications(params.roomId);
+  // A show-only open keeps the native ring going: the user has not answered
+  // yet, and silencing it here left a locked phone showing a silent screen.
+  dismissCallTrayNotifications(params.roomId, params.autoAccept !== false);
   if (state.params) {
-    setState({ ...state, minimized: false });
+    const answersShownCall =
+      params.autoAccept !== false &&
+      state.params.autoAccept === false &&
+      state.params.roomId === params.roomId;
+    setState({
+      ...state,
+      params: answersShownCall ? { ...state.params, autoAccept: true } : state.params,
+      minimized: false,
+    });
     return;
   }
   setState({ params, minimized: false, instance: state.instance + 1 });
+}
+
+/**
+ * Close the overlay if it is showing this call as an unanswered incoming call
+ * (opened show-only and never answered on this device). Used when the call
+ * stops ringing elsewhere — caller hung up, declined from a notification,
+ * answered on another device — so the incoming screen vanishes the way it
+ * does on any phone, instead of lingering with live buttons.
+ */
+export function closeRingingCall(callSessionId: string) {
+  if (state.params?.roomId !== callSessionId) return;
+  if (state.params.autoAccept !== false) return;
+  closeCall();
 }
 
 /**
@@ -79,16 +106,22 @@ export function openCall(params: CallUiParams) {
  * deliberately ongoing so the user cannot swipe it away either. Only native
  * code can retire it.
  *
- * A no-op on an older binary that predates the native method.
+ * On a binary with IncomingCallRinger this stops every native ring surface for
+ * the call (notification, ringing service, ring screen); older binaries can
+ * only clear the notification. A no-op on binaries that predate both.
  */
 export function dismissNativeCallNotification(callSessionId: string) {
   if (Platform.OS !== "android") return;
   if (!callSessionId || callSessionId === "pending") return;
   const native = NativeModules.CallForegroundService as
-    | { dismissIncomingCallNotification?: (id: string) => void }
+    | {
+        stopIncomingCall?: (id: string) => void;
+        dismissIncomingCallNotification?: (id: string) => void;
+      }
     | undefined;
   try {
-    native?.dismissIncomingCallNotification?.(callSessionId);
+    if (native?.stopIncomingCall) native.stopIncomingCall(callSessionId);
+    else native?.dismissIncomingCallNotification?.(callSessionId);
   } catch {
     // Older binary without the method — nothing of ours to clear.
   }
@@ -111,7 +144,7 @@ export function dismissNativeCallNotification(callSessionId: string) {
  * Targeted on purpose: only notifications carrying this call's id. Chat and
  * question notifications must survive a call.
  */
-function dismissCallTrayNotifications(roomId: string) {
+function dismissCallTrayNotifications(roomId: string, includeNativeRing: boolean) {
   if (!roomId || roomId === "pending") return;
 
   // The CallStyle notification the native FCM service posts when the
@@ -120,7 +153,7 @@ function dismissCallTrayNotifications(roomId: string) {
   // below never sees it — and it is deliberately ongoing, so the user cannot
   // swipe it away either. Clear it natively or it sits there ringing at a call
   // that is already answered.
-  dismissNativeCallNotification(roomId);
+  if (includeNativeRing) dismissNativeCallNotification(roomId);
 
   void Notifications.getPresentedNotificationsAsync()
     .then((presented) => {
@@ -165,9 +198,14 @@ export function expandCall() {
   setState({ ...state, minimized: false });
 }
 
-/** Tear down the overlay — unmounts <CallScreen/> (its cleanup effect ends the room). */
-export function closeCall() {
+/**
+ * Tear down the overlay — unmounts <CallScreen/> (its cleanup effect ends the
+ * room). Pass the call id when acting on a specific call, so a late callback
+ * can never close a different one.
+ */
+export function closeCall(roomId?: string) {
   if (!state.params) return;
+  if (roomId !== undefined && state.params.roomId !== roomId) return;
   setState({ params: null, minimized: false, instance: state.instance });
 }
 

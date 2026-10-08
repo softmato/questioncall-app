@@ -28,7 +28,8 @@ import { updateChannelLastMessage, upsertChannel } from "@/store/slices/channels
 import { updateUser } from "@/store/slices/userSlice";
 import { prependNotification } from "@/store/slices/notificationsSlice";
 import { endCallKeepCall, incomingCallMetadataMap } from "@/lib/callkeep-setup";
-import { hideFullScreenCallNotification } from "@/lib/full-screen-call-notification";
+import { stopIncomingRing } from "@/lib/full-screen-call-notification";
+import { closeRingingCall } from "@/lib/call-ui-store";
 import { prewarmCalleeRoom, clearCalleePrewarm } from "@/lib/call-prewarm";
 import { isCallActive } from "@/lib/active-call";
 import { surfaceIncomingCall, forgetCallDispatch } from "@/lib/call-dispatch";
@@ -194,24 +195,27 @@ export function RealtimeBridge() {
       }
     });
 
-    channel.bind(CALL_CANCELLED_EVENT, (payload: any) => {
-      if (!payload?.callSessionId) return;
-      const callSessionId = String(payload.callSessionId);
+    // The call stopped ringing somewhere other than this device's own buttons:
+    // silence every ring surface for it (including the native CallStyle ring,
+    // which hideFullScreenCallNotification alone never reached) and close the
+    // in-app incoming screen if it is up and unanswered.
+    const stopRinging = (callSessionId: string) => {
       incomingCallMetadataMap.delete(callSessionId);
       forgetCallDispatch(callSessionId);
       endCallKeepCall(callSessionId);
-      hideFullScreenCallNotification();
+      stopIncomingRing(callSessionId);
+      closeRingingCall(callSessionId);
       clearCalleePrewarm(callSessionId);
+    };
+
+    channel.bind(CALL_CANCELLED_EVENT, (payload: any) => {
+      if (!payload?.callSessionId) return;
+      stopRinging(String(payload.callSessionId));
     });
 
     channel.bind(CALL_MISSED_EVENT, (payload: any) => {
       if (!payload?.callSessionId) return;
-      const callSessionId = String(payload.callSessionId);
-      incomingCallMetadataMap.delete(callSessionId);
-      forgetCallDispatch(callSessionId);
-      endCallKeepCall(callSessionId);
-      hideFullScreenCallNotification();
-      clearCalleePrewarm(callSessionId);
+      stopRinging(String(payload.callSessionId));
     });
 
     // The call was accepted/rejected on another of THIS user's devices (same
@@ -220,15 +224,13 @@ export function RealtimeBridge() {
     channel.bind(CALL_HANDLED_EVENT, (payload: any) => {
       if (!payload?.callSessionId) return;
       const callSessionId = String(payload.callSessionId);
-      // Ignore our own action's echo, and never tear down a call we're inside
-      // (this device is the one that accepted).
+      // Ignore our own action's echo.
       if (payload.byDeviceId && payload.byDeviceId === getDeviceId()) return;
-      if (isCallActive(callSessionId)) return;
-      incomingCallMetadataMap.delete(callSessionId);
-      forgetCallDispatch(callSessionId);
-      endCallKeepCall(callSessionId);
-      hideFullScreenCallNotification();
-      clearCalleePrewarm(callSessionId);
+      // No device id to compare (older client): never tear down a call this
+      // device may be the one inside. With an id that is not ours, isCallActive
+      // only means our incoming screen is showing — exactly what must close.
+      if (!payload.byDeviceId && isCallActive(callSessionId)) return;
+      stopRinging(callSessionId);
     });
 
     channel.bind(SUBSCRIPTION_UPDATED_EVENT, (payload: any) => {

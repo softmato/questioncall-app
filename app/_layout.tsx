@@ -416,6 +416,7 @@ function RootLayout() {
                     <Stack.Screen name="profile/activity" />
                     <Stack.Screen name="profile/change-password" />
                     <Stack.Screen name="settings/call-settings" />
+                    <Stack.Screen name="settings/call-setup" />
                     <Stack.Screen name="settings/notifications" />
                     <Stack.Screen name="settings/theme" />
                     <Stack.Screen name="legal/index" />

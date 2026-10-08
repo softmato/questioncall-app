@@ -1,5 +1,4 @@
-import { Platform, Alert, Linking, NativeModules } from "react-native";
-import AsyncStorage from "@react-native-async-storage/async-storage";
+import { Platform, Alert, Linking } from "react-native";
 import * as Notifications from "expo-notifications";
 import * as Device from "expo-device";
 import { api } from "@/lib/api";
@@ -209,51 +208,6 @@ async function setupCallNotificationCategory() {
   ]);
 }
 
-const FULL_SCREEN_INTENT_PROMPT_KEY = "questioncall.fullScreenIntentPromptShown";
-
-type CallNativeModule = {
-  canUseFullScreenIntent?: () => Promise<boolean>;
-  openFullScreenIntentSettings?: () => void;
-};
-
-/**
- * Android 14 removed the automatic USE_FULL_SCREEN_INTENT grant for most apps.
- * Without it the system downgrades an incoming call to a plain heads-up banner
- * — the screen stays off and the call looks like any other notification, which
- * is precisely the behaviour the full-screen path exists to fix. Nothing warns
- * you: it just silently does less.
- *
- * Ask once per install. Someone who says no keeps working calls, just without
- * the screen waking, and can flip it on later in system settings.
- */
-async function ensureFullScreenIntentPermission(): Promise<void> {
-  if (Platform.OS !== "android") return;
-
-  const native = NativeModules.CallForegroundService as CallNativeModule | undefined;
-  if (!native?.canUseFullScreenIntent) return;
-
-  const granted = await native.canUseFullScreenIntent().catch(() => true);
-  if (granted) return;
-
-  const alreadyAsked = await AsyncStorage.getItem(FULL_SCREEN_INTENT_PROMPT_KEY).catch(
-    () => null,
-  );
-  if (alreadyAsked) return;
-  await AsyncStorage.setItem(FULL_SCREEN_INTENT_PROMPT_KEY, "1").catch(() => {});
-
-  Alert.alert(
-    "Let calls ring full screen",
-    "Android needs one extra permission before QuestionCall can wake your screen for an incoming call, the way a phone call does.\n\nWithout it, calls still arrive — but only as a normal notification.",
-    [
-      { text: "Not now", style: "cancel" },
-      {
-        text: "Open Settings",
-        onPress: () => native.openFullScreenIntentSettings?.(),
-      },
-    ],
-  );
-}
-
 /** Show an alert directing the user to system settings to enable notifications manually. */
 async function showSettingsAlert(): Promise<void> {
   await new Promise<void>((resolve) => {
@@ -345,13 +299,6 @@ export async function registerForPushNotifications(): Promise<string | null> {
   await setupCallNotificationCategory().catch((err) => {
     console.warn(
       "[push] Failed to register the incoming-call category:",
-      err?.message ?? err,
-    );
-  });
-
-  await ensureFullScreenIntentPermission().catch((err) => {
-    console.warn(
-      "[push] Full-screen intent permission check failed:",
       err?.message ?? err,
     );
   });

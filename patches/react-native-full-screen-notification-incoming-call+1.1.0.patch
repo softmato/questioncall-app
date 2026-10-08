@@ -1,8 +1,38 @@
 diff --git a/node_modules/react-native-full-screen-notification-incoming-call/android/src/main/java/com/reactnativefullscreennotificationincomingcall/IncomingCallActivity.java b/node_modules/react-native-full-screen-notification-incoming-call/android/src/main/java/com/reactnativefullscreennotificationincomingcall/IncomingCallActivity.java
-index 3395f00..f7c94cc 100644
+index 3395f00..a1ea190 100644
 --- a/node_modules/react-native-full-screen-notification-incoming-call/android/src/main/java/com/reactnativefullscreennotificationincomingcall/IncomingCallActivity.java
 +++ b/node_modules/react-native-full-screen-notification-incoming-call/android/src/main/java/com/reactnativefullscreennotificationincomingcall/IncomingCallActivity.java
-@@ -90,19 +90,9 @@ public class IncomingCallActivity extends AppCompatActivity implements DefaultHa
+@@ -61,12 +61,28 @@ public class IncomingCallActivity extends AppCompatActivity implements DefaultHa
+   @Override
+   public void onDestroy() {
+     Log.d(TAG, "onDestroy: ");
+-    if (active) {
++    // Only a real, unanswered finish counts as a decline. Without these checks
++    // a rotation or theme change — which destroys and recreates the activity —
++    // rejected the call the user was looking at.
++    if (active && isFinishing() && !isChangingConfigurations()) {
+       dismissIncoming(Constants.ACTION_REJECTED_CALL);
+     }
+     super.onDestroy();
+   }
+ 
++  /**
++   * Close the ring screen if it is showing this call (any call when null).
++   * Called when the ring stops for a reason other than a press here — the
++   * caller hung up, the call was answered elsewhere, the ring timed out — so a
++   * dead call is never left on screen with live Accept/Decline buttons.
++   */
++  public static void dismissIfShowing(@androidx.annotation.Nullable String callUuid) {
++    final IncomingCallActivity current = instance;
++    if (!active || current == null) return;
++    if (callUuid != null && !callUuid.equals(current.uuid)) return;
++    current.runOnUiThread(() -> current.destroyActivity(false));
++  }
++
+   @Override
+   protected void onCreate(Bundle savedInstanceState) {
+     super.onCreate(savedInstanceState);
+@@ -90,19 +106,9 @@ public class IncomingCallActivity extends AppCompatActivity implements DefaultHa
      if (bundle.containsKey("uuid")) {
        uuid = bundle.getString("uuid");
      }
@@ -25,7 +55,7 @@ index 3395f00..f7c94cc 100644
      } else {
        setContentView(R.layout.activity_call_incoming);
      }
-@@ -166,15 +156,56 @@ public class IncomingCallActivity extends AppCompatActivity implements DefaultHa
+@@ -166,15 +172,56 @@ public class IncomingCallActivity extends AppCompatActivity implements DefaultHa
  
    private void acceptDialing() {
      active = false;
@@ -83,8 +113,40 @@ index 3395f00..f7c94cc 100644
      if (Build.VERSION.SDK_INT >= 21) {
        finishAndRemoveTask();
      } else {
+@@ -184,14 +231,25 @@ public class IncomingCallActivity extends AppCompatActivity implements DefaultHa
+ 
+   private void dismissDialing(String action) {
+     active = false;
+-    WritableMap params = Arguments.createMap();
+     Bundle bundle = getIntent().getExtras();
+-    if (bundle.containsKey("payload")) {
+-      params.putString("payload", bundle.getString("payload"));
++    // The app's decline receiver tells the server (and JS, if alive) itself —
++    // see NotificationReceiverHandler.sendDeclineIntent.
++    boolean handedOff = Constants.ACTION_REJECTED_CALL.equals(action)
++      && NotificationReceiverHandler.sendDeclineIntent(bundle);
++    if (!handedOff) {
++      WritableMap params = Arguments.createMap();
++      if (bundle != null && bundle.containsKey("payload")) {
++        params.putString("payload", bundle.getString("payload"));
++      }
++      params.putString("callUUID", uuid);
++      params.putString("endAction", action);
++      try {
++        FullScreenNotificationIncomingCallModule.sendEventToJs(Constants.RNNotificationEndCallAction, params);
++      } catch (Exception e) {
++        // No React context (ring raised by FCM with the app killed). Used to
++        // crash the process here.
++      }
+     }
+-    params.putString("callUUID", uuid);
+-    params.putString("endAction", action);
+-    FullScreenNotificationIncomingCallModule.sendEventToJs(Constants.RNNotificationEndCallAction, params);
+     stopService(new Intent(this, IncomingCallService.class));
+     if (android.os.Build.VERSION.SDK_INT >= 21) {
+       finishAndRemoveTask();
 diff --git a/node_modules/react-native-full-screen-notification-incoming-call/android/src/main/java/com/reactnativefullscreennotificationincomingcall/IncomingCallService.java b/node_modules/react-native-full-screen-notification-incoming-call/android/src/main/java/com/reactnativefullscreennotificationincomingcall/IncomingCallService.java
-index 502fe36..49ee298 100644
+index 502fe36..b321f65 100644
 --- a/node_modules/react-native-full-screen-notification-incoming-call/android/src/main/java/com/reactnativefullscreennotificationincomingcall/IncomingCallService.java
 +++ b/node_modules/react-native-full-screen-notification-incoming-call/android/src/main/java/com/reactnativefullscreennotificationincomingcall/IncomingCallService.java
 @@ -17,6 +17,8 @@ import android.graphics.Color;
@@ -185,37 +247,102 @@ index 502fe36..49ee298 100644
        notificationChannel.enableLights(true);
        notificationChannel.enableVibration(true);
        notificationChannel.setLightColor(Color.WHITE);
-@@ -303,6 +347,7 @@ public class IncomingCallService extends Service {
+@@ -303,6 +347,9 @@ public class IncomingCallService extends Service {
    public void onDestroy() {
      super.onDestroy();
      Log.d(TAG, "onDestroy service");
 +    stopRingtone();
++    // The ring is over, whoever stopped it — take the ring screen with it.
++    IncomingCallActivity.dismissIfShowing(uuid);
      cancelTimer();
      stopForeground(true);
      unregisterBroadcastPressEvent();
-@@ -341,7 +386,7 @@ public class IncomingCallService extends Service {
+@@ -339,9 +386,13 @@ public class IncomingCallService extends Service {
+         }
+         params.putString("callUUID", uuid);
          params.putString("endAction", Constants.ACTION_HIDE_CALL);
-         FullScreenNotificationIncomingCallModule.sendEventToJs(Constants.RNNotificationEndCallAction, params);
+-        FullScreenNotificationIncomingCallModule.sendEventToJs(Constants.RNNotificationEndCallAction, params);
++        try {
++          FullScreenNotificationIncomingCallModule.sendEventToJs(Constants.RNNotificationEndCallAction, params);
++        } catch (Exception e) {
++          // No React context — an unanswered ring on a killed app used to crash here.
++        }
          cancelTimer();
 -        stopForeground(true);
 +        stopSelf();
        }
      };
      callhandle.postDelayed(handleTimeout, timeoutNumber);
-@@ -392,7 +437,7 @@ public class IncomingCallService extends Service {
-           params.putString("callUUID", uuid);
-           params.putString("endAction", Constants.ACTION_REJECTED_CALL);
-           FullScreenNotificationIncomingCallModule.sendEventToJs(Constants.RNNotificationEndCallAction, params);
+@@ -385,14 +436,20 @@ public class IncomingCallService extends Service {
+           if (IncomingCallActivity.active) {
+             IncomingCallActivity.getInstance().destroyActivity(false);
+           }
+-          WritableMap params = Arguments.createMap();
+-          if (bundleData.containsKey("payload")) {
+-            params.putString("payload", bundleData.getString("payload"));
++          if (!NotificationReceiverHandler.sendDeclineIntent(bundleData)) {
++            WritableMap params = Arguments.createMap();
++            if (bundleData.containsKey("payload")) {
++              params.putString("payload", bundleData.getString("payload"));
++            }
++            params.putString("callUUID", uuid);
++            params.putString("endAction", Constants.ACTION_REJECTED_CALL);
++            try {
++              FullScreenNotificationIncomingCallModule.sendEventToJs(Constants.RNNotificationEndCallAction, params);
++            } catch (Exception e) {
++              // No React context — Decline on a killed app used to crash here.
++            }
+           }
+-          params.putString("callUUID", uuid);
+-          params.putString("endAction", Constants.ACTION_REJECTED_CALL);
+-          FullScreenNotificationIncomingCallModule.sendEventToJs(Constants.RNNotificationEndCallAction, params);
 -          stopForeground(true);
 +          stopSelf();
          }
        }
      }
 diff --git a/node_modules/react-native-full-screen-notification-incoming-call/android/src/main/java/com/reactnativefullscreennotificationincomingcall/NotificationReceiverHandler.java b/node_modules/react-native-full-screen-notification-incoming-call/android/src/main/java/com/reactnativefullscreennotificationincomingcall/NotificationReceiverHandler.java
-index beb50db..262c1dc 100644
+index beb50db..1a55e14 100644
 --- a/node_modules/react-native-full-screen-notification-incoming-call/android/src/main/java/com/reactnativefullscreennotificationincomingcall/NotificationReceiverHandler.java
 +++ b/node_modules/react-native-full-screen-notification-incoming-call/android/src/main/java/com/reactnativefullscreennotificationincomingcall/NotificationReceiverHandler.java
-@@ -72,8 +72,51 @@ public class NotificationReceiverHandler {
+@@ -2,6 +2,7 @@ package com.reactnativefullscreennotificationincomingcall;
+ 
+ 
+ import android.annotation.SuppressLint;
++import android.app.PendingIntent;
+ import android.content.Context;
+ import android.content.Intent;
+ import android.os.Build;
+@@ -31,6 +32,28 @@ public class NotificationReceiverHandler {
+     return canClick;
+   }
+ 
++  /**
++   * Hand a Decline to the app's own receiver when the ring carries one.
++   *
++   * The library's decline used to be nothing but a JS event. When the ring was
++   * raised by FCM with the app killed there is no JS: the event threw (crashing
++   * the process) and nobody told the server, so the caller rang on to the
++   * timeout. The app's receiver silences the device, records the decline,
++   * notifies JS when it is alive, and POSTs the decline with the push's
++   * single-purpose token when it is not.
++   */
++  static boolean sendDeclineIntent(Bundle bundle) {
++    if (bundle == null) return false;
++    try {
++      PendingIntent decline = bundle.getParcelable("questioncall.declineIntent");
++      if (decline == null) return false;
++      decline.send();
++      return true;
++    } catch (Exception e) {
++      return false;
++    }
++  }
++
+   private static void handleNotificationIntent(Context context, Intent intent) {
+     if(!canClick) return;
+     String action= intent.getAction();
+@@ -72,8 +95,51 @@ public class NotificationReceiverHandler {
      }
      params.putBoolean("accept", true);
      params.putString("callUUID", uuid);

@@ -13,6 +13,7 @@ import Animated, {
 import { useAppSelector } from "@/hooks/redux";
 import { useAppTheme } from "@/hooks/use-app-theme";
 import { AskFab } from "@/components/ui/ask-fab";
+import { maybeOpenCallSetup } from "@/lib/call-setup";
 import {
   BottomChromeProvider,
   CENTER_BUTTON_RAISE,
@@ -310,6 +311,17 @@ function TabsShell() {
   useEffect(() => {
     currentIdx.value = tabIdx;
   }, [currentIdx, tabIdx]);
+
+  // First time into the app (cold start or a fresh sign-in), open Call setup if
+  // anything would stop calls ringing. Here rather than the root layout so it
+  // never races the sign-in navigation; the delay lets the notification prompt
+  // from push registration go first.
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      void maybeOpenCallSetup(() => router.push("/settings/call-setup" as any));
+    }, 2500);
+    return () => clearTimeout(timer);
+  }, []);
 
   const translateX = useSharedValue(0);
   // Captures translationX at the moment the gesture activates so the

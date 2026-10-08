@@ -14,6 +14,7 @@ import { useAppSelector } from "@/hooks/redux";
 import { purgeLocalSession } from "@/lib/session";
 import { useAppTheme } from "@/hooks/use-app-theme";
 import { useTabBarScroll } from "@/components/ui/bottom-chrome";
+import { useCallSetup } from "@/lib/call-setup";
 import Animated from "react-native-reanimated";
 import { PlanBadge } from "@/components/PlanBadge";
 import type { ComponentProps } from "react";
@@ -101,6 +102,7 @@ export default function MenuScreen() {
   const { onScroll, scrollEventThrottle, tabBarClearance } = useTabBarScroll();
   const config = useAppSelector((s) => s.config.data);
   const unreadNotificationCount = useAppSelector((s) => s.notifications.unreadCount);
+  const { issues: callSetupIssues } = useCallSetup();
   const { statusBarStyle, backgroundColor, cardColor, primaryColor, primarySoftColor } =
     useAppTheme();
   const isTeacher = user?.role === "TEACHER";
@@ -400,6 +402,22 @@ export default function MenuScreen() {
             onPress={() => router.push("/settings/call-settings" as any)}
           />
           <Divider />
+          {Platform.OS === "android" ? (
+            <>
+              <MenuItem
+                icon="shield-checkmark-outline"
+                label="Call Setup"
+                subtitle={
+                  callSetupIssues > 0
+                    ? "Calls may not ring when the app is closed"
+                    : "Calls ring even when the app is closed"
+                }
+                badge={callSetupIssues > 0 ? String(callSetupIssues) : undefined}
+                onPress={() => router.push("/settings/call-setup" as any)}
+              />
+              <Divider />
+            </>
+          ) : null}
           <MenuItem
             icon="play-circle-outline"
             label="Onboarding Videos"

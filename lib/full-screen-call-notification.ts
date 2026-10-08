@@ -1,5 +1,11 @@
-import { Platform, NativeModules, NativeEventEmitter } from "react-native";
-import { openCall, dismissNativeCallNotification } from "@/lib/call-ui-store";
+import { AppState, Platform, NativeModules, NativeEventEmitter } from "react-native";
+import {
+  closeCall,
+  closeRingingCall,
+  dismissNativeCallNotification,
+  hasActiveCallUi,
+  openCall,
+} from "@/lib/call-ui-store";
 import {
   endCallKeepCall,
   reportCallConnected,
@@ -47,7 +53,35 @@ export function setupFullScreenCallListeners() {
   // The listeners above only catch an answer that happens while this JS context
   // is alive. An answer from a killed app never reaches them.
   void drainPendingNativeAccept();
+  // Nor does one emitted into a bridge that is not listening (a backgrounded
+  // process whose events go nowhere). MainActivity records every accept it is
+  // launched for, so look again whenever the app comes to the front — a
+  // duplicate collapses in acceptCall().
+  AppState.addEventListener("change", (next) => {
+    if (next === "active") void drainPendingNativeAccept();
+  });
 }
+
+/**
+ * Silence every ring surface for this call: the library's ringing service and
+ * ring screen, and the native CallStyle notification. Scoped to this call on a
+ * binary with IncomingCallRinger; older ones can only stop whatever is ringing.
+ */
+export function stopIncomingRing(callSessionId: string) {
+  const native = NativeModules.CallForegroundService as
+    | { stopIncomingCall?: (id: string) => void }
+    | undefined;
+  if (!native?.stopIncomingCall) hideFullScreenCallNotification();
+  dismissNativeCallNotification(callSessionId);
+}
+
+/**
+ * Calls this process has already accepted. Accept arrives over up to three
+ * routes for one tap (the library event, the pending-accept record, the
+ * answered=1 deep link), deliberately, because on a cold start any one of them
+ * can be the only survivor. Only the first may POST /accept.
+ */
+const acceptedCallIds = new Set<string>();
 
 /**
  * Pick up an accept the user pressed before this JS context existed.
@@ -88,7 +122,7 @@ export async function drainPendingNativeAccept(): Promise<void> {
 type PendingNativeAccept = { callSessionId?: string; mode?: string };
 
 // Exported: also invoked by the CallKeep answerCall listener (the only accept
-// surface on iOS). Idempotent via the isCallActive guard.
+// surface on iOS). Idempotent: see acceptedCallIds and the isCallActive guard.
 export async function acceptCall(
   callSessionId: string,
   /**
@@ -98,32 +132,30 @@ export async function acceptCall(
    */
   modeHint?: "AUDIO" | "VIDEO",
 ) {
-  // Guard: if we're already inside this call, the notification is a stale
-  // duplicate (e.g. native FCM re-dispatch). Just clear it instead of
-  // re-running /accept and re-navigating to the same live screen.
+  // Stop ringing before anything else, on every surface. Harmless to repeat.
+  stopIncomingRing(callSessionId);
+
+  // The call screen for this call is already up — either the live call (a
+  // stale duplicate accept), or the in-app incoming screen, where pressing
+  // Accept on the notification must answer rather than be swallowed.
+  // openCall() flips that screen to answer; on a live call it only re-focuses.
+  //
+  // This used to end the CallKeep call instead, which on Android POSTed
+  // /reject and reset the audio mode mid-call, and on iOS ended CallKit's
+  // audio session under the live call.
   if (isCallActive(callSessionId)) {
     incomingCallMetadataMap.delete(callSessionId);
-    hideFullScreenCallNotification();
-    endCallKeepCall(callSessionId);
+    openCall({ roomId: callSessionId, mode: modeHint, autoAccept: true });
     return;
   }
 
-  // An accept for this call is already on the wire. Both the native
-  // pending-accept drain and the questioncall://call/<id>?answered=1 deep link
-  // land here for the same tap (deliberately — either one alone can be the only
-  // survivor of a cold start), so the second arrival must not POST /accept
-  // again. Re-focusing the call UI is all it has left to do.
-  if (pendingAcceptRef.current?.callSessionId === callSessionId) {
-    openCall({ roomId: callSessionId, mode: modeHint });
+  // Already accepted by an earlier route for the same tap — see acceptedCallIds.
+  // Re-focus if that call is still on screen; never reopen one that has ended.
+  if (acceptedCallIds.has(callSessionId)) {
+    if (hasActiveCallUi()) openCall({ roomId: callSessionId, mode: modeHint });
     return;
   }
-
-  // Stop ringing before anything else. When accept arrives through the native
-  // notification the library tears its own service down, but the CallKeep
-  // answerCall and in-app accept paths land here directly — leaving
-  // IncomingCallService (and its looping ringtone) running until the 45s
-  // timeout. Harmless to repeat: hideNotification is a stopService call.
-  hideFullScreenCallNotification();
+  acceptedCallIds.add(callSessionId);
 
   // Pull cached metadata captured at incoming-call time.  Pusher/push payload
   // mode is authoritative — the server /accept response is a fallback for
@@ -167,9 +199,23 @@ export async function acceptCall(
           });
           return;
         } catch (err: any) {
-          // 409 = the server already moved this call out of RINGING (another
-          // device accepted, or our own earlier retry landed). Nothing to do.
-          if (err?.response?.status === 409) return;
+          // 409 = the server already moved this call out of RINGING: our own
+          // earlier retry landed (fine), or the caller hung up / the ring timed
+          // out a moment before the tap. The screen is already showing a live
+          // call, so in the second case it would wait in an empty room for
+          // ever — ask, and leave if the call is not actually running.
+          if (err?.response?.status === 409) {
+            const status = await api
+              .get(`/calls/${callSessionId}`)
+              .then((res) => (res.data as { status?: string } | null)?.status)
+              .catch(() => null);
+            if (status && status !== "ACTIVE") {
+              const Toast = (await import("react-native-toast-message")).default;
+              Toast.show({ type: "info", text1: "Call ended" });
+              closeCall(callSessionId);
+            }
+            return;
+          }
           if (attempt === 2) {
             console.warn(
               "[acceptCall] background /accept failed after retry:",
@@ -250,10 +296,9 @@ export async function acceptCall(
 // Exported: also invoked by the notification's Decline action (see _layout).
 export async function rejectCall(callSessionId: string) {
   incomingCallMetadataMap.delete(callSessionId);
-  hideFullScreenCallNotification();
-  // hideFullScreenCallNotification() only stops IncomingCallService. The
-  // CallStyle fallback notification is ours and outlives it.
-  dismissNativeCallNotification(callSessionId);
+  stopIncomingRing(callSessionId);
+  // Declined from a notification while the in-app incoming screen was up.
+  closeRingingCall(callSessionId);
   endCallKeepCall(callSessionId);
   try {
     const { api } = await import("@/lib/api");
