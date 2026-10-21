@@ -35,6 +35,7 @@ type CallDispatchNativeModule = {
     callSessionId: string,
     callerName: string,
     isVideo: boolean,
+    callerImage: string | null,
   ) => Promise<"RANG" | "HANDLED" | "FAILED">;
 };
 
@@ -45,6 +46,8 @@ const nativeDispatch = NativeModules.CallForegroundService as
 export type IncomingCallSignal = {
   callSessionId: string;
   callerName: string;
+  /** Caller's photo URL for the native ring screen. */
+  callerImage?: string | null;
   mode: "AUDIO" | "VIDEO";
   callerId: string;
   channelId: string;
@@ -121,6 +124,7 @@ export async function surfaceIncomingCall(signal: IncomingCallSignal): Promise<b
         callSessionId,
         callerName,
         mode === "VIDEO",
+        signal.callerImage ?? null,
       );
       return outcome === "RANG";
     } catch {

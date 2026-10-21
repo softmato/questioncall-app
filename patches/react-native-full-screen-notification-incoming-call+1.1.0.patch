@@ -1,5 +1,5 @@
 diff --git a/node_modules/react-native-full-screen-notification-incoming-call/android/src/main/java/com/reactnativefullscreennotificationincomingcall/IncomingCallActivity.java b/node_modules/react-native-full-screen-notification-incoming-call/android/src/main/java/com/reactnativefullscreennotificationincomingcall/IncomingCallActivity.java
-index 3395f00..a1ea190 100644
+index 3395f00..5206e31 100644
 --- a/node_modules/react-native-full-screen-notification-incoming-call/android/src/main/java/com/reactnativefullscreennotificationincomingcall/IncomingCallActivity.java
 +++ b/node_modules/react-native-full-screen-notification-incoming-call/android/src/main/java/com/reactnativefullscreennotificationincomingcall/IncomingCallActivity.java
 @@ -61,12 +61,28 @@ public class IncomingCallActivity extends AppCompatActivity implements DefaultHa
@@ -55,6 +55,15 @@ index 3395f00..a1ea190 100644
      } else {
        setContentView(R.layout.activity_call_incoming);
      }
+@@ -127,7 +133,7 @@ public class IncomingCallActivity extends AppCompatActivity implements DefaultHa
+       if (bundle.containsKey("avatar")) {
+         String avatar = bundle.getString("avatar");
+         if (avatar != null) {
+-          Picasso.get().load(avatar).transform(new CircleTransform()).into(ivAvatar);
++          Picasso.get().load(avatar).fit().centerCrop().transform(new CircleTransform()).into(ivAvatar);
+         }
+       }
+       if (bundle.containsKey("declineText")) {
 @@ -166,15 +172,56 @@ public class IncomingCallActivity extends AppCompatActivity implements DefaultHa
  
    private void acceptDialing() {
@@ -146,7 +155,7 @@ index 3395f00..a1ea190 100644
      if (android.os.Build.VERSION.SDK_INT >= 21) {
        finishAndRemoveTask();
 diff --git a/node_modules/react-native-full-screen-notification-incoming-call/android/src/main/java/com/reactnativefullscreennotificationincomingcall/IncomingCallService.java b/node_modules/react-native-full-screen-notification-incoming-call/android/src/main/java/com/reactnativefullscreennotificationincomingcall/IncomingCallService.java
-index 502fe36..b321f65 100644
+index 502fe36..f4bec5e 100644
 --- a/node_modules/react-native-full-screen-notification-incoming-call/android/src/main/java/com/reactnativefullscreennotificationincomingcall/IncomingCallService.java
 +++ b/node_modules/react-native-full-screen-notification-incoming-call/android/src/main/java/com/reactnativefullscreennotificationincomingcall/IncomingCallService.java
 @@ -17,6 +17,8 @@ import android.graphics.Color;
@@ -177,7 +186,26 @@ index 502fe36..b321f65 100644
      NotificationReceiverHandler.updateCanClick(true);
      registerBroadcastPressEvent();
  
-@@ -150,6 +157,47 @@ public class IncomingCallService extends Service {
+@@ -109,13 +116,11 @@ public class IncomingCallService extends Service {
+   }
+ 
+   private void handleNotificationWithAvatar(Bundle bundle, Intent intent) {
+-    String avatarUrl = bundle.getString("avatar", null);
+-
+-    if (avatarUrl != null) {
+-      loadAvatarAndStartForeground(avatarUrl, intent);
+-    } else {
+-      startForegroundWithNotification(intent, null);
+-    }
++    // Patched: never wait on the avatar download before startForeground().
++    // Android kills the app when a foreground service has not called it within
++    // a few seconds, and a slow network at ring time takes that long. The ring
++    // screen loads the avatar itself from the same extras.
++    startForegroundWithNotification(intent, null);
+   }
+ 
+   private void loadAvatarAndStartForeground(String avatarUrl, Intent intent) {
+@@ -150,6 +155,47 @@ public class IncomingCallService extends Service {
      } else {
        startForeground(1, notification);
      }
@@ -225,7 +253,7 @@ index 502fe36..b321f65 100644
    }
  
    private PendingIntent onButtonNotificationClick(int id, String action, String eventName) {
-@@ -212,7 +260,7 @@ public class IncomingCallService extends Service {
+@@ -212,7 +258,7 @@ public class IncomingCallService extends Service {
        .setOngoing(true)
        .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
        .setVibrate(new long[]{0, 1000, 800})
@@ -234,7 +262,7 @@ index 502fe36..b321f65 100644
        .setFullScreenIntent(emptyPendingIntent, true);
    }
  
-@@ -245,11 +293,7 @@ public class IncomingCallService extends Service {
+@@ -245,11 +291,7 @@ public class IncomingCallService extends Service {
      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
        NotificationManager notificationManager = (NotificationManager) context.getSystemService(Context.NOTIFICATION_SERVICE);
        NotificationChannel notificationChannel = new NotificationChannel(channelId, channelName, NotificationManager.IMPORTANCE_HIGH);
@@ -247,7 +275,7 @@ index 502fe36..b321f65 100644
        notificationChannel.enableLights(true);
        notificationChannel.enableVibration(true);
        notificationChannel.setLightColor(Color.WHITE);
-@@ -303,6 +347,9 @@ public class IncomingCallService extends Service {
+@@ -303,6 +345,9 @@ public class IncomingCallService extends Service {
    public void onDestroy() {
      super.onDestroy();
      Log.d(TAG, "onDestroy service");
@@ -257,7 +285,7 @@ index 502fe36..b321f65 100644
      cancelTimer();
      stopForeground(true);
      unregisterBroadcastPressEvent();
-@@ -339,9 +386,13 @@ public class IncomingCallService extends Service {
+@@ -339,9 +384,13 @@ public class IncomingCallService extends Service {
          }
          params.putString("callUUID", uuid);
          params.putString("endAction", Constants.ACTION_HIDE_CALL);
@@ -273,7 +301,7 @@ index 502fe36..b321f65 100644
        }
      };
      callhandle.postDelayed(handleTimeout, timeoutNumber);
-@@ -385,14 +436,20 @@ public class IncomingCallService extends Service {
+@@ -385,14 +434,20 @@ public class IncomingCallService extends Service {
            if (IncomingCallActivity.active) {
              IncomingCallActivity.getInstance().destroyActivity(false);
            }

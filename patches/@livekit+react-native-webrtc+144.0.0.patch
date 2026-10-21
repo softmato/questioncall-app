@@ -1,0 +1,114 @@
+diff --git a/node_modules/@livekit/react-native-webrtc/android/src/main/java/com/oney/WebRTCModule/MediaProjectionNotification.java b/node_modules/@livekit/react-native-webrtc/android/src/main/java/com/oney/WebRTCModule/MediaProjectionNotification.java
+index e09aa00..0a3254a 100644
+--- a/node_modules/@livekit/react-native-webrtc/android/src/main/java/com/oney/WebRTCModule/MediaProjectionNotification.java
++++ b/node_modules/@livekit/react-native-webrtc/android/src/main/java/com/oney/WebRTCModule/MediaProjectionNotification.java
+@@ -50,6 +50,16 @@ class MediaProjectionNotification {
+     }
+ 
+     static Notification buildMediaProjectionNotification(Context context) {
++        // An icon id of 0 makes Android replace this with a generic "<app> is running" notice.
++        String pkg = context.getPackageName();
++        int icon = context.getResources().getIdentifier("ic_notification", "drawable", pkg);
++        if (icon == 0) {
++            icon = context.getResources().getIdentifier("notification_icon", "drawable", pkg);
++        }
++        if (icon == 0) {
++            icon = context.getApplicationInfo().icon;
++        }
++
+         NotificationCompat.Builder builder = new NotificationCompat.Builder(context, ONGOING_CONFERENCE_CHANNEL_ID);
+ 
+         builder.setCategory(NotificationCompat.CATEGORY_CALL)
+@@ -61,8 +71,7 @@ class MediaProjectionNotification {
+                 .setAutoCancel(true)
+                 .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
+                 .setOnlyAlertOnce(true)
+-                .setSmallIcon(
+-                        context.getResources().getIdentifier("ic_notification", "drawable", context.getPackageName()))
++                .setSmallIcon(icon)
+                 .setForegroundServiceBehavior(NotificationCompat.FOREGROUND_SERVICE_IMMEDIATE);
+ 
+         return builder.build();
+diff --git a/node_modules/@livekit/react-native-webrtc/android/src/main/java/com/oney/WebRTCModule/MediaProjectionService.java b/node_modules/@livekit/react-native-webrtc/android/src/main/java/com/oney/WebRTCModule/MediaProjectionService.java
+index 26e188c..8474269 100644
+--- a/node_modules/@livekit/react-native-webrtc/android/src/main/java/com/oney/WebRTCModule/MediaProjectionService.java
++++ b/node_modules/@livekit/react-native-webrtc/android/src/main/java/com/oney/WebRTCModule/MediaProjectionService.java
+@@ -11,6 +11,8 @@ import android.os.IBinder;
+ import android.util.Log;
+ 
+ import java.util.Random;
++import java.util.concurrent.CountDownLatch;
++import java.util.concurrent.TimeUnit;
+ 
+ /**
+  * This class implements an Android {@link Service}, a foreground one specifically, and it's
+@@ -24,11 +26,17 @@ public class MediaProjectionService extends Service {
+ 
+     static final int NOTIFICATION_ID = new Random().nextInt(99999) + 10000;
+ 
++    // Counted down once onStartCommand has called startForeground().
++    private static volatile CountDownLatch foregroundLatch;
++
+     public static void launch(Context context) {
+         if (!WebRTCModuleOptions.getInstance().enableMediaProjectionService) {
+             return;
+         }
+ 
++        CountDownLatch latch = new CountDownLatch(1);
++        foregroundLatch = latch;
++
+         MediaProjectionNotification.createNotificationChannel(context);
+         Intent intent = new Intent(context, MediaProjectionService.class);
+         ComponentName componentName;
+@@ -50,6 +58,18 @@ public class MediaProjectionService extends Service {
+             Log.w(TAG, "Media projection service not started");
+         } else {
+             Log.i(TAG, "Media projection service started");
++            // startForegroundService() is async. On Android 14+ getMediaProjection() throws
++            // SecurityException until this service is actually in the foreground, and
++            // startCapture() swallows that, so the track publishes with no frames (peer sees
++            // black). launch() runs on the WebRTC executor, never the main thread, so blocking
++            // here cannot deadlock onStartCommand.
++            try {
++                if (!latch.await(3, TimeUnit.SECONDS)) {
++                    Log.w(TAG, "Media projection service not in foreground after 3s");
++                }
++            } catch (InterruptedException e) {
++                Thread.currentThread().interrupt();
++            }
+         }
+     }
+ 
+@@ -77,6 +97,11 @@ public class MediaProjectionService extends Service {
+             startForeground(NOTIFICATION_ID, notification);
+         }
+ 
++        CountDownLatch latch = foregroundLatch;
++        if (latch != null) {
++            latch.countDown();
++        }
++
+         return START_NOT_STICKY;
+     }
+ }
+diff --git a/node_modules/@livekit/react-native-webrtc/android/src/main/java/com/oney/WebRTCModule/ScreenCaptureController.java b/node_modules/@livekit/react-native-webrtc/android/src/main/java/com/oney/WebRTCModule/ScreenCaptureController.java
+index b5741aa..6fd9b22 100644
+--- a/node_modules/@livekit/react-native-webrtc/android/src/main/java/com/oney/WebRTCModule/ScreenCaptureController.java
++++ b/node_modules/@livekit/react-native-webrtc/android/src/main/java/com/oney/WebRTCModule/ScreenCaptureController.java
+@@ -67,6 +67,16 @@ public class ScreenCaptureController extends AbstractVideoCaptureController {
+         return "screen-capture";
+     }
+ 
++    // MediaStreamTrack.stop() only disables the track (-> stopCapture), it never disposes it,
++    // so tying the service to dispose() left it running after the share or call ended. A
++    // stopped MediaProjection cannot be restarted anyway.
++    @Override
++    public boolean stopCapture() {
++        boolean stopped = super.stopCapture();
++        MediaProjectionService.abort(context);
++        return stopped;
++    }
++
+     @Override
+     public void dispose() {
+         MediaProjectionService.abort(context);

@@ -451,6 +451,10 @@ import com.reactnativefullscreennotificationincomingcall.IncomingCallService
 import expo.modules.notifications.service.ExpoFirebaseMessagingService
 import org.json.JSONObject
 
+/** Picasso loads only web URLs; anything else keeps the default avatar. */
+fun webUrlOrNull(url: String?): String? =
+  url?.takeIf { it.startsWith("https://") || it.startsWith("http://") }
+
 /** One incoming call, whichever transport carried it. */
 data class IncomingCall(
   val id: String,
@@ -466,6 +470,8 @@ data class IncomingCall(
   val declineToken: String?,
   /** Absolute endpoint the token is good for, supplied by the same push. */
   val declineUrl: String?,
+  /** Caller's photo URL for the ring screen; null shows the default avatar. */
+  val avatar: String? = null,
 )
 
 /**
@@ -640,6 +646,7 @@ class CallNotificationService : ExpoFirebaseMessagingService() {
       isVideo = read("mode") == "VIDEO",
       declineToken = read("declineToken"),
       declineUrl = read("declineUrl"),
+      avatar = webUrlOrNull(read("callerImage")),
     )
   }
 
@@ -823,7 +830,8 @@ object IncomingCallRinger {
       action = Constants.ACTION_SHOW_INCOMING_CALL
       putExtra("uuid", call.id)
       putExtra("name", call.callerName)
-      putExtra("avatar", null as String?)
+      // The patched service never waits on this download (see patch file).
+      putExtra("avatar", call.avatar)
       putExtra(
         "info",
         if (call.isVideo) "Incoming video call..." else "Incoming voice call...",
@@ -959,6 +967,7 @@ object IncomingCallRinger {
       addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
       putExtra("uuid", call.id)
       putExtra("name", call.callerName)
+      putExtra("avatar", call.avatar)
       putExtra(
         "info",
         if (call.isVideo) "Incoming video call..." else "Incoming voice call...",
@@ -1293,6 +1302,7 @@ class CallForegroundServiceModule(
     callSessionId: String?,
     callerName: String?,
     isVideo: Boolean,
+    callerImage: String?,
     promise: Promise,
   ) {
     val id = callSessionId ?: ""
@@ -1307,6 +1317,7 @@ class CallForegroundServiceModule(
         isVideo = isVideo,
         declineToken = null,
         declineUrl = null,
+        avatar = webUrlOrNull(callerImage),
       )
       promise.resolve(IncomingCallRinger.ring(reactContext, call).name)
     } catch (_: Exception) {

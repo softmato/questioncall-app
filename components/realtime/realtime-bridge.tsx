@@ -170,6 +170,7 @@ export function RealtimeBridge() {
       const surfaced = await surfaceIncomingCall({
         callSessionId,
         callerName,
+        callerImage: typeof payload.callerImage === "string" ? payload.callerImage : null,
         mode,
         callerId: String(payload.callerId ?? ""),
         channelId,

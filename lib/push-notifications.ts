@@ -47,6 +47,7 @@ Notifications.setNotificationHandler({
       await surfaceIncomingCall({
         callSessionId: data.callSessionId,
         callerName,
+        callerImage: typeof data.callerImage === "string" ? data.callerImage : null,
         mode,
         callerId: String(data.callerId ?? ""),
         channelId: String(data.channelId ?? ""),
