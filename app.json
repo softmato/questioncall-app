@@ -39,6 +39,10 @@
         "MANAGE_OWN_CALLS",
         "USE_FULL_SCREEN_INTENT"
       ],
+      "blockedPermissions": [
+        "android.permission.READ_MEDIA_IMAGES",
+        "android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK"
+      ],
       "edgeToEdgeEnabled": true,
       "predictiveBackGestureEnabled": false,
       "package": "com.softmato.questioncall",
