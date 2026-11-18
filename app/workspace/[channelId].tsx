@@ -20,6 +20,8 @@ import { Ionicons } from "@expo/vector-icons";
 import * as DocumentPicker from "expo-document-picker";
 import * as FileSystem from "expo-file-system/legacy";
 import * as ImagePicker from "expo-image-picker";
+import * as Haptics from "expo-haptics";
+import Animated, { FadeIn, FadeInDown, FadeOut, ZoomIn } from "react-native-reanimated";
 import { Audio } from "expo-av";
 import { router, useLocalSearchParams } from "expo-router";
 import Toast from "react-native-toast-message";
@@ -111,7 +113,14 @@ type OutgoingMedia = {
   name: string;
   mimeType: string;
   size?: number;
+  width?: number;
+  height?: number;
 };
+
+// Vercel caps a request body at 4.5 MB, and /upload is a plain POST — a
+// full-quality camera photo can exceed it and fail outright. 0.6 keeps
+// handwriting legible at a fraction of the size.
+const PHOTO_QUALITY = 0.6;
 
 const DEFAULT_MIME: Record<OutgoingMedia["kind"], string> = {
   IMAGE: "image/jpeg",
@@ -147,16 +156,16 @@ export default function WorkspaceScreen() {
   const detail = cached?.detail ?? null;
   const messages = useMemo(() => cached?.messages ?? [], [cached?.messages]);
   const { openImageViewer } = useImageViewer();
-  const chatSurfaceColor = isDark ? "#0b1411" : backgroundColor;
-  const chatHeaderColor = isDark ? "#111b18" : backgroundColor;
-  const chatPanelColor = isDark ? "#17231f" : cardColor;
-  const chatInputColor = isDark ? "#202c27" : "#f1f5f9";
-  // The composer action reads as the same accent as an own-message bubble,
-  // so send/mic and the messages it produces belong to one palette.
+  // Neutral surfaces only — the brand green is reserved for your own bubbles
+  // and the send action, so the chat no longer reads as a green wash.
+  const chatSurfaceColor = isDark ? "#141211" : "#F5F5F4";
+  const chatHeaderColor = isDark ? backgroundColor : "#FFFFFF";
+  const chatPanelColor = isDark ? cardColor : "#F5F5F4";
+  const chatInputColor = isDark ? cardColor : "#F5F5F4";
   const chatPrimaryActionColor = primaryColor;
   const chatPrimaryActionTextColor = "#ffffff";
-  const chatTextColor = isDark ? "#e9edef" : "#111827";
-  const chatSubtleIconColor = isDark ? "#8696a0" : "#64748b";
+  const chatTextColor = isDark ? "#F5F5F4" : "#1C1917";
+  const chatSubtleIconColor = isDark ? "#A8A29E" : "#78716C";
 
   const isAsker = userId === detail?.askerId;
   const isAcceptor = userId === detail?.acceptorId;
@@ -172,7 +181,6 @@ export default function WorkspaceScreen() {
   const bottomBarPadding = COMPOSER_BOTTOM_GAP + (isKeyboardVisible ? 0 : insets.bottom);
 
   const [inputText, setInputText] = useState("");
-  const [isSending, setIsSending] = useState(false);
   const [ratingModalVisible, setRatingModalVisible] = useState(false);
   const [selectedRating, setSelectedRating] = useState(0);
   const [isClosing, setIsClosing] = useState(false);
@@ -182,7 +190,13 @@ export default function WorkspaceScreen() {
   );
 
   const flatListRef = useRef<FlatList<any>>(null);
-  const isLoadingOlderRef = useRef(false);
+  // Only messages newer than this slide in; the history on open just appears.
+  const mountedAtRef = useRef(Date.now());
+  const [attachOpen, setAttachOpen] = useState(false);
+  const [showJumpToLatest, setShowJumpToLatest] = useState(false);
+  const scrollToLatest = useCallback(() => {
+    flatListRef.current?.scrollToOffset({ offset: 0, animated: true });
+  }, []);
   // Declared here with null; assigned after fetchChannel useCallback below
   // to avoid Temporal Dead Zone errors (fetchChannel is a const).
   const fetchChannelRef = useRef<((force?: boolean) => Promise<void>) | null>(null);
@@ -204,11 +218,6 @@ export default function WorkspaceScreen() {
       try {
         const res = await api.get(`/channels/${channelId}`);
         const { channel, messages: msgs } = res.data;
-        // Diagnostic: log questionImages so we can verify the API is returning them.
-        console.warn(
-          `[workspace] channel API questionImages for ${channelId}:`,
-          channel?.questionImages,
-        );
         const serverMessages = (msgs as ChatMessage[]) ?? [];
         const persisted = await getFailedMessages(channelId);
         const failedMessages: ChatMessage[] = persisted.map((p) => ({
@@ -447,7 +456,9 @@ export default function WorkspaceScreen() {
   // ─── Send message ──────────────────────────────────────────────
   const handleSend = async () => {
     const text = inputText.trim();
-    if (!text || isSending || !isActive) return;
+    // No in-flight lock: the bubble is optimistic, so a second message can go
+    // out while the first is still on the wire (the button used to spin).
+    if (!text || !isActive) return;
 
     const localId = `local_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
     const optimistic: ChatMessage = {
@@ -469,7 +480,8 @@ export default function WorkspaceScreen() {
 
     setInputText("");
     dispatch(addPendingMessage(optimistic));
-    setIsSending(true);
+    void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light).catch(() => {});
+    scrollToLatest();
 
     try {
       const res = await api.post(`/channels/${channelId}/messages`, {
@@ -492,8 +504,6 @@ export default function WorkspaceScreen() {
       dispatch(failPendingMessage(localId));
       enqueueFailedMessage(optimistic).catch(() => {});
       Toast.show({ type: "error", text1: "Failed to send message" });
-    } finally {
-      setIsSending(false);
     }
   };
 
@@ -553,7 +563,8 @@ export default function WorkspaceScreen() {
   };
 
   const sendMedia = async (media: OutgoingMedia) => {
-    const localId = `local_media_${Date.now()}`;
+    setAttachOpen(false);
+    const localId = `local_media_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
     // The website sends a document's file name as its text; so does this.
     const content = media.kind === "DOCUMENT" ? media.name : "";
     const optimistic: ChatMessage = {
@@ -573,9 +584,17 @@ export default function WorkspaceScreen() {
       isDeleted: false,
       sentAt: new Date().toISOString(),
       isSending: true,
-      localMedia: { name: media.name, mimeType: media.mimeType, size: media.size },
+      localMedia: {
+        name: media.name,
+        mimeType: media.mimeType,
+        size: media.size,
+        width: media.width,
+        height: media.height,
+      },
     };
     dispatch(addPendingMessage(optimistic));
+    void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light).catch(() => {});
+    scrollToLatest();
 
     try {
       const mediaUrl = await uploadChatMedia(media);
@@ -627,6 +646,9 @@ export default function WorkspaceScreen() {
       uri: asset.uri,
       name: asset.fileName ?? `chat-${Date.now()}.${isVideo ? "mp4" : "jpg"}`,
       mimeType: asset.mimeType ?? (isVideo ? "video/mp4" : "image/jpeg"),
+      size: asset.fileSize,
+      width: asset.width,
+      height: asset.height,
     });
   };
 
@@ -639,7 +661,10 @@ export default function WorkspaceScreen() {
       return;
     }
     const result = await withSystemDialog(() =>
-      ImagePicker.launchCameraAsync({ mediaTypes: ["images", "videos"], quality: 0.85 }),
+      ImagePicker.launchCameraAsync({
+        mediaTypes: ["images", "videos"],
+        quality: PHOTO_QUALITY,
+      }),
     );
     if (!result.canceled && result.assets[0]) sendPickedAsset(result.assets[0]);
   };
@@ -655,7 +680,7 @@ export default function WorkspaceScreen() {
     const result = await withSystemDialog(() =>
       ImagePicker.launchImageLibraryAsync({
         mediaTypes: ["images", "videos"],
-        quality: 0.85,
+        quality: PHOTO_QUALITY,
       }),
     );
     if (!result.canceled && result.assets[0]) sendPickedAsset(result.assets[0]);
@@ -678,13 +703,32 @@ export default function WorkspaceScreen() {
 
   const handleAttach = () => {
     if (!isActive) return;
-    Alert.alert("Attach", undefined, [
-      { text: "Camera", onPress: () => void handleOpenCamera() },
-      { text: "Photo or video", onPress: () => void handlePickFromGallery() },
-      { text: "Document", onPress: () => void handlePickDocument() },
-      { text: "Cancel", style: "cancel" },
-    ]);
+    setAttachOpen((v) => !v);
   };
+
+  const attachOptions = [
+    {
+      key: "camera",
+      icon: "camera" as const,
+      label: "Camera",
+      color: "#EF4444",
+      onPress: handleOpenCamera,
+    },
+    {
+      key: "gallery",
+      icon: "images" as const,
+      label: "Gallery",
+      color: "#8B5CF6",
+      onPress: handlePickFromGallery,
+    },
+    {
+      key: "doc",
+      icon: "document-text" as const,
+      label: "Document",
+      color: "#3B82F6",
+      onPress: handlePickDocument,
+    },
+  ];
 
   // ─── Mark as answer (teacher only) ─────────────────────────────
   const handleToggleMark = useCallback(
@@ -1001,10 +1045,10 @@ export default function WorkspaceScreen() {
     await sendVoiceMessage(uri);
   };
 
+  const hasOlder = messages.length > visibleCount;
   const handleLoadOlder = useCallback(() => {
-    isLoadingOlderRef.current = true;
-    setVisibleCount((c) => c + PAGE_SIZE);
-  }, []);
+    if (hasOlder) setVisibleCount((c) => c + PAGE_SIZE);
+  }, [hasOlder]);
 
   // Reset pagination when channel changes
   useEffect(() => {
@@ -1024,7 +1068,9 @@ export default function WorkspaceScreen() {
       }
       result.push(msg);
     }
-    return result;
+    // Newest first for the inverted list: it opens pinned to the latest
+    // message with no scroll-to-end jump, and new messages land in view.
+    return result.reverse();
   }, [messages, visibleCount]);
 
   // Consecutive messages from one sender read as a single block: only the last
@@ -1053,8 +1099,13 @@ export default function WorkspaceScreen() {
     }) => (
       <MessageItem
         item={item}
-        isGroupStart={!isSameSender(item, messagesWithDates[index - 1])}
-        isGroupEnd={!isSameSender(item, messagesWithDates[index + 1])}
+        // Inverted: the chronologically previous message is at index + 1.
+        isGroupStart={!isSameSender(item, messagesWithDates[index + 1])}
+        isGroupEnd={!isSameSender(item, messagesWithDates[index - 1])}
+        animateIn={
+          !("__dateSeparator" in item) &&
+          new Date(item.sentAt).getTime() > mountedAtRef.current
+        }
         userId={userId}
         isAcceptor={isAcceptor}
         isActive={isActive}
@@ -1441,9 +1492,9 @@ export default function WorkspaceScreen() {
       {detail.questionTitle ? (
         <View
           style={{
-            backgroundColor: isDark ? "#15231f" : "#f0f9ff",
-            borderBottomWidth: 1,
-            borderBottomColor: isDark ? "rgba(255,255,255,0.08)" : "#bae6fd",
+            backgroundColor: chatHeaderColor,
+            borderBottomWidth: 0.5,
+            borderBottomColor: borderColor,
           }}
         >
           {/* Always-visible header row — tap to expand / collapse */}
@@ -1504,39 +1555,66 @@ export default function WorkspaceScreen() {
       ) : null}
 
       {/* ── Messages ────────────────────────────────────────── */}
-      <FlatList
-        ref={flatListRef}
-        data={messagesWithDates}
-        keyboardShouldPersistTaps="handled"
-        keyboardDismissMode="interactive"
-        keyExtractor={(item, i) =>
-          "__dateSeparator" in item
-            ? `sep-${item.__dateSeparator}-${i}`
-            : item.id || item.localId || `msg-${i}`
-        }
-        renderItem={renderItem as any}
-        style={{ backgroundColor: chatSurfaceColor }}
-        contentContainerStyle={{ paddingVertical: 10 }}
-        showsVerticalScrollIndicator={false}
-        onContentSizeChange={() => {
-          if (!isLoadingOlderRef.current) {
-            flatListRef.current?.scrollToEnd({ animated: false });
+      <View style={{ flex: 1 }}>
+        <FlatList
+          ref={flatListRef}
+          inverted
+          data={messagesWithDates}
+          keyboardShouldPersistTaps="handled"
+          keyboardDismissMode="interactive"
+          keyExtractor={(item) =>
+            "__dateSeparator" in item
+              ? `sep-${item.__dateSeparator}`
+              : // clientKey survives the optimistic → server swap, so a sent
+                // photo's row never remounts (the old blank-image flash).
+                item.clientKey || item.id || item.localId || item.sentAt
           }
-          isLoadingOlderRef.current = false;
-        }}
-        ListHeaderComponent={
-          messages.length > visibleCount ? (
+          renderItem={renderItem as any}
+          style={{ backgroundColor: chatSurfaceColor }}
+          contentContainerStyle={{ paddingVertical: 10 }}
+          showsVerticalScrollIndicator={false}
+          onEndReached={handleLoadOlder}
+          onEndReachedThreshold={0.4}
+          onScroll={(e) => {
+            const away = e.nativeEvent.contentOffset.y > 600;
+            if (away !== showJumpToLatest) setShowJumpToLatest(away);
+          }}
+          scrollEventThrottle={100}
+          ListFooterComponent={
+            hasOlder ? (
+              <ActivityIndicator style={{ marginVertical: 12 }} color={mutedIconColor} />
+            ) : null
+          }
+        />
+        {showJumpToLatest ? (
+          <Animated.View
+            entering={FadeIn.duration(150)}
+            exiting={FadeOut.duration(150)}
+            style={{ position: "absolute", right: 14, bottom: 12 }}
+          >
             <TouchableOpacity
-              onPress={handleLoadOlder}
-              className="mx-auto my-3 flex-row items-center gap-1.5 rounded-full border border-border bg-card px-4 py-2"
-              activeOpacity={0.7}
+              onPress={scrollToLatest}
+              accessibilityLabel="Jump to latest message"
+              style={{
+                width: 38,
+                height: 38,
+                borderRadius: 19,
+                alignItems: "center",
+                justifyContent: "center",
+                backgroundColor: chatHeaderColor,
+                borderWidth: 0.5,
+                borderColor,
+                shadowColor: "#000",
+                shadowOpacity: 0.12,
+                shadowRadius: 6,
+                elevation: 4,
+              }}
             >
-              <Ionicons name="arrow-up-circle-outline" size={15} color={mutedIconColor} />
-              <Text className="text-xs text-muted-foreground">Load older messages</Text>
+              <Ionicons name="chevron-down" size={20} color={chatTextColor} />
             </TouchableOpacity>
-          ) : null
-        }
-      />
+          </Animated.View>
+        ) : null}
+      </View>
 
       {/* ── Input bar ───────────────────────────────────────── */}
       {isActive ? (
@@ -1641,7 +1719,6 @@ export default function WorkspaceScreen() {
               </TouchableOpacity>
               <TouchableOpacity
                 onPress={handleSendPendingAudio}
-                disabled={isSending}
                 style={{
                   width: 42,
                   height: 42,
@@ -1651,86 +1728,125 @@ export default function WorkspaceScreen() {
                   justifyContent: "center",
                 }}
               >
-                {isSending ? (
-                  <ActivityIndicator color={chatPrimaryActionTextColor} size="small" />
-                ) : (
-                  <Ionicons name="send" size={18} color={chatPrimaryActionTextColor} />
-                )}
+                <Ionicons name="send" size={18} color={chatPrimaryActionTextColor} />
               </TouchableOpacity>
             </View>
           ) : (
-            /* ── Normal input — matches screenshot: + | input | mic circle ── */
-            <View style={{ flexDirection: "row", alignItems: "flex-end", gap: 10 }}>
-              {/* + button (camera, gallery, document) */}
-              <TouchableOpacity
-                onPress={handleAttach}
-                accessibilityLabel="Attach a photo, video or document"
-                style={{
-                  width: 38,
-                  height: 38,
-                  borderRadius: 19,
-                  alignItems: "center",
-                  justifyContent: "center",
-                  marginBottom: 2,
-                }}
-                hitSlop={6}
-              >
-                <Ionicons name="add" size={26} color={chatSubtleIconColor} />
-              </TouchableOpacity>
-
-              {/* Text input pill */}
-              <View
-                style={{
-                  flex: 1,
-                  backgroundColor: chatInputColor,
-                  borderRadius: 22,
-                  paddingHorizontal: 16,
-                  paddingVertical: 10,
-                  maxHeight: 120,
-                }}
-              >
-                <TextInput
-                  value={inputText}
-                  onChangeText={setInputText}
-                  placeholder="Type Here..."
-                  placeholderTextColor={mutedIconColor}
-                  multiline
+            /* ── Normal input: + | input | send/mic ── */
+            <View>
+              {attachOpen ? (
+                <Animated.View
+                  entering={FadeInDown.duration(180)}
+                  exiting={FadeOut.duration(120)}
                   style={{
-                    fontSize: 15,
-                    color: chatTextColor,
-                    textAlignVertical: "top",
-                    maxHeight: 100,
-                    padding: 0,
+                    flexDirection: "row",
+                    justifyContent: "space-around",
+                    paddingBottom: 12,
+                    paddingTop: 2,
                   }}
-                />
-              </View>
+                >
+                  {attachOptions.map((o) => (
+                    <TouchableOpacity
+                      key={o.key}
+                      onPress={() => void o.onPress()}
+                      accessibilityLabel={o.label}
+                      style={{ alignItems: "center", gap: 6, minWidth: 72 }}
+                    >
+                      <View
+                        style={{
+                          width: 50,
+                          height: 50,
+                          borderRadius: 25,
+                          alignItems: "center",
+                          justifyContent: "center",
+                          backgroundColor: o.color,
+                        }}
+                      >
+                        <Ionicons name={o.icon} size={22} color="#fff" />
+                      </View>
+                      <Text style={{ fontSize: 12, color: chatTextColor }}>
+                        {o.label}
+                      </Text>
+                    </TouchableOpacity>
+                  ))}
+                </Animated.View>
+              ) : null}
+              <View style={{ flexDirection: "row", alignItems: "flex-end", gap: 8 }}>
+                {/* + button toggles the attach row (camera, gallery, document) */}
+                <TouchableOpacity
+                  onPress={handleAttach}
+                  accessibilityLabel="Attach a photo, video or document"
+                  style={{
+                    width: 40,
+                    height: 40,
+                    borderRadius: 20,
+                    alignItems: "center",
+                    justifyContent: "center",
+                    marginBottom: 1,
+                    backgroundColor: attachOpen ? chatInputColor : "transparent",
+                    transform: [{ rotate: attachOpen ? "45deg" : "0deg" }],
+                  }}
+                  hitSlop={6}
+                >
+                  <Ionicons name="add" size={26} color={chatSubtleIconColor} />
+                </TouchableOpacity>
 
-              {/* Send / Mic — dark circle like screenshot */}
-              <TouchableOpacity
-                onPress={inputText.trim() ? handleSend : handleVoiceRecord}
-                disabled={isSending}
-                style={{
-                  width: 42,
-                  height: 42,
-                  borderRadius: 21,
-                  backgroundColor: chatPrimaryActionColor,
-                  alignItems: "center",
-                  justifyContent: "center",
-                  marginBottom: 2,
-                }}
-              >
-                {isSending ? (
-                  <ActivityIndicator color={chatPrimaryActionTextColor} size="small" />
-                ) : inputText.trim() ? (
-                  <Ionicons name="send" size={18} color={chatPrimaryActionTextColor} />
-                ) : (
-                  <Ionicons
-                    name="mic-outline"
-                    size={20}
-                    color={chatPrimaryActionTextColor}
+                {/* Text input pill */}
+                <View
+                  style={{
+                    flex: 1,
+                    backgroundColor: chatInputColor,
+                    borderRadius: 22,
+                    paddingHorizontal: 16,
+                    paddingVertical: 10,
+                    maxHeight: 120,
+                  }}
+                >
+                  <TextInput
+                    value={inputText}
+                    onChangeText={setInputText}
+                    onFocus={() => setAttachOpen(false)}
+                    placeholder="Message"
+                    placeholderTextColor={mutedIconColor}
+                    multiline
+                    style={{
+                      fontSize: 15,
+                      color: chatTextColor,
+                      textAlignVertical: "top",
+                      maxHeight: 100,
+                      padding: 0,
+                    }}
                   />
-                )}
-              </TouchableOpacity>
+                </View>
+
+                {/* Send / Mic — the icon pops on swap */}
+                <TouchableOpacity
+                  onPress={inputText.trim() ? handleSend : handleVoiceRecord}
+                  accessibilityLabel={
+                    inputText.trim() ? "Send message" : "Record voice message"
+                  }
+                  style={{
+                    width: 42,
+                    height: 42,
+                    borderRadius: 21,
+                    backgroundColor: chatPrimaryActionColor,
+                    alignItems: "center",
+                    justifyContent: "center",
+                    marginBottom: 1,
+                  }}
+                >
+                  <Animated.View
+                    key={inputText.trim() ? "send" : "mic"}
+                    entering={ZoomIn.duration(140)}
+                  >
+                    <Ionicons
+                      name={inputText.trim() ? "send" : "mic-outline"}
+                      size={inputText.trim() ? 18 : 20}
+                      color={chatPrimaryActionTextColor}
+                    />
+                  </Animated.View>
+                </TouchableOpacity>
+              </View>
             </View>
           )}
         </View>

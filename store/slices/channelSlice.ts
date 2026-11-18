@@ -28,7 +28,17 @@ export interface ChatMessage {
   isSending?: boolean;
   sendFailed?: boolean;
   /** A pending send's file, kept so a retry can upload it (mediaUrl is its local uri). */
-  localMedia?: { name: string; mimeType: string; size?: number };
+  localMedia?: {
+    name: string;
+    mimeType: string;
+    size?: number;
+    width?: number;
+    height?: number;
+  };
+  /** The optimistic localId, kept after the server copy lands so the list row never remounts. */
+  clientKey?: string;
+  /** Local file shown while the uploaded copy downloads — avoids the blank flash on resolve. */
+  localPreviewUri?: string;
 }
 
 export interface ChannelDetail {
@@ -90,6 +100,65 @@ function getActive(state: ChannelState) {
   return state.cache[state.activeChannelId] ?? null;
 }
 
+/**
+ * A server refetch replaces the list, but must not erase what only this device
+ * knows: sends still uploading or failed (a gallery pick backgrounds the app,
+ * the socket reconnects, and the refetch used to wipe the in-flight photo until
+ * the chat was reopened), and the local preview/row key of a send that landed.
+ */
+function mergeServerMessages(existing: ChatMessage[] | undefined, server: ChatMessage[]) {
+  const prevById = new Map((existing ?? []).map((m) => [getMessageId(m), m]));
+  const seen = new Set<string>();
+  const out: ChatMessage[] = [];
+  for (const m of server) {
+    const id = getMessageId(m);
+    if (seen.has(id)) continue;
+    seen.add(id);
+    const prev = prevById.get(id);
+    out.push(
+      prev?.clientKey || prev?.localPreviewUri
+        ? { ...m, clientKey: prev.clientKey, localPreviewUri: prev.localPreviewUri }
+        : m,
+    );
+  }
+  for (const m of existing ?? []) {
+    if ((m.isSending || m.sendFailed) && !seen.has(getMessageId(m))) {
+      seen.add(getMessageId(m));
+      out.push(m);
+    }
+  }
+  return out;
+}
+
+function resolveAt(
+  entry: ChannelCacheEntry,
+  idx: number,
+  prev: ChatMessage,
+  next: ChatMessage,
+) {
+  entry.messages[idx] = {
+    ...next,
+    clientKey: prev.clientKey ?? prev.localId,
+    localMedia: next.localMedia ?? prev.localMedia,
+    localPreviewUri:
+      prev.localPreviewUri ??
+      (prev.mediaUrl && !/^https?:\/\//.test(prev.mediaUrl) ? prev.mediaUrl : undefined),
+  };
+}
+
+/**
+ * The cache entry holding a pending send. Uploads outlive the screen: the user
+ * can leave the chat mid-upload (activeChannelId → null), and resolving against
+ * the active entry used to drop the result, leaving a bubble stuck "sending".
+ */
+function findPending(state: ChannelState, localId: string) {
+  for (const entry of Object.values(state.cache)) {
+    const idx = entry.messages.findIndex((m) => m.localId === localId);
+    if (idx !== -1) return { entry, idx };
+  }
+  return null;
+}
+
 const channelSlice = createSlice({
   name: "channel",
   initialState,
@@ -111,7 +180,11 @@ const channelSlice = createSlice({
     ) {
       const { channelId, detail, messages } = action.payload;
       state.activeChannelId = channelId;
-      state.cache[channelId] = { detail, messages, fetchedAt: Date.now() };
+      state.cache[channelId] = {
+        detail,
+        messages: mergeServerMessages(state.cache[channelId]?.messages, messages),
+        fetchedAt: Date.now(),
+      };
       state.isLoading = false;
       state.error = null;
     },
@@ -133,16 +206,9 @@ const channelSlice = createSlice({
       }>,
     ) {
       const { channelId, detail, messages } = action.payload;
-      const existing = state.cache[channelId];
-      const localOnly =
-        existing?.messages.filter((m) => m.isSending || m.sendFailed) ?? [];
-      const serverIds = new Set(messages.map(getMessageId));
       state.cache[channelId] = {
         detail,
-        messages: [
-          ...messages,
-          ...localOnly.filter((m) => !serverIds.has(getMessageId(m))),
-        ],
+        messages: mergeServerMessages(state.cache[channelId]?.messages, messages),
         fetchedAt: Date.now(),
       };
     },
@@ -177,31 +243,36 @@ const channelSlice = createSlice({
       }
     },
     addPendingMessage(state, action: PayloadAction<ChatMessage>) {
-      const entry = getActive(state);
+      const entry = state.cache[action.payload.channelId] ?? getActive(state);
       if (entry) entry.messages.push(action.payload);
     },
     resolvePendingMessage(
       state,
       action: PayloadAction<{ localId: string; message: ChatMessage }>,
     ) {
-      const entry = getActive(state);
-      if (!entry) return;
-      const idx = entry.messages.findIndex((m) => m.localId === action.payload.localId);
-      if (idx !== -1) {
-        entry.messages[idx] = action.payload.message;
-      }
+      const found = findPending(state, action.payload.localId);
+      if (!found) return;
+      const { entry, idx } = found;
+      const prev = entry.messages[idx];
+      const next = action.payload.message;
+      // A refetch can land the server copy before this resolve does; drop that
+      // copy so the pending row (and its stable key) becomes the one message.
+      const serverId = next.localId ? "" : getMessageId(next);
+      const dup = serverId
+        ? entry.messages.findIndex((m, i) => i !== idx && getMessageId(m) === serverId)
+        : -1;
+      if (dup !== -1) entry.messages.splice(dup, 1);
+      resolveAt(entry, dup !== -1 && dup < idx ? idx - 1 : idx, prev, next);
     },
     failPendingMessage(state, action: PayloadAction<string>) {
-      const entry = getActive(state);
-      if (!entry) return;
-      const idx = entry.messages.findIndex((m) => m.localId === action.payload);
-      if (idx !== -1) {
-        entry.messages[idx] = {
-          ...entry.messages[idx],
-          isSending: false,
-          sendFailed: true,
-        };
-      }
+      const found = findPending(state, action.payload);
+      if (!found) return;
+      const { entry, idx } = found;
+      entry.messages[idx] = {
+        ...entry.messages[idx],
+        isSending: false,
+        sendFailed: true,
+      };
     },
     removeMessage(state, action: PayloadAction<string>) {
       const entry = getActive(state);

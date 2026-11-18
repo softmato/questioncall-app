@@ -1,3 +1,23 @@
+import { router } from "expo-router";
+import { hasAnyActiveCall } from "@/lib/active-call";
+import { store } from "@/store";
+
+const autoOpened = new Set<string>();
+
+/**
+ * Takes the asker straight into the chat their question just opened. Called
+ * from both the `channel:new` socket event and the QUESTION_ACCEPTED push,
+ * whichever lands first: the socket alone missed it whenever it was mid-
+ * reconnect (e.g. right after the app came back from the background).
+ */
+export function openAcceptedChannel(channelId: string) {
+  if (!channelId || autoOpened.has(channelId)) return;
+  autoOpened.add(channelId);
+  if (hasAnyActiveCall()) return;
+  if (store.getState().channels.activeChannelId === channelId) return;
+  router.push(`/workspace/${channelId}` as any);
+}
+
 // Notification hrefs are written by the web server and shared with the website,
 // so they are web paths. This maps each to the app route that shows the same
 // thing; anything unrecognised falls back to the feed rather than not-found.

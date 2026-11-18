@@ -36,6 +36,7 @@ import { RealtimeBridge } from "@/components/realtime/realtime-bridge";
 import { ImageViewerProvider } from "@/components/image-viewer/image-viewer-context";
 import {
   registerForPushNotifications,
+  refreshPushRegistration,
   subscribePushToken,
   addNotificationResponseListener,
   addNotificationReceivedListener,
@@ -43,6 +44,7 @@ import {
   CALL_ACTION_ACCEPT,
   CALL_ACTION_DECLINE,
 } from "@/lib/push-notifications";
+import * as Notifications from "expo-notifications";
 import type { NotificationResponse } from "expo-notifications";
 
 import { ensureLiveKitRegistered } from "@/lib/livekit-setup";
@@ -53,7 +55,7 @@ import {
   rejectCall,
 } from "@/lib/full-screen-call-notification";
 import { stopOngoingCallService } from "@/lib/ongoing-call-service";
-import { resolveNotificationRoute } from "@/lib/notification-route";
+import { openAcceptedChannel, resolveNotificationRoute } from "@/lib/notification-route";
 
 import { BrandSplash, releaseBootSplash } from "@/components/branding/brand-splash";
 import { GlobalUploadOverlay } from "@/components/sprint2/global-upload-overlay";
@@ -248,6 +250,9 @@ function AppInitializer({ children }: { children: React.ReactNode }) {
       // Record DAU on every foreground — server deduplicates via upsert
       api.post("/daily-active", { platform: "app" }).catch(() => {});
 
+      // Keep this device's push token registered (throttled, never prompts).
+      void refreshPushRegistration().catch(() => {});
+
       // Background refresh channels + notes if stale
       void backgroundPrefetch();
     },
@@ -276,6 +281,16 @@ function AppInitializer({ children }: { children: React.ReactNode }) {
       void signInFromHostelPalika(store.dispatch, url);
     });
     const receivedSub = addNotificationReceivedListener((notification) => {
+      // Backup for the socket's channel:new: if it was mid-reconnect when the
+      // teacher accepted, this push is the only signal the foreground app gets.
+      const pushData = notification.request.content.data;
+      const acceptedHref = typeof pushData?.href === "string" ? pushData.href : "";
+      if (
+        pushData?.type === "QUESTION_ACCEPTED" &&
+        acceptedHref.startsWith("/workspace/")
+      ) {
+        openAcceptedChannel(acceptedHref.slice("/workspace/".length));
+      }
       console.log(
         "[push] ★ Notification RECEIVED:",
         JSON.stringify({
@@ -317,6 +332,11 @@ function AppInitializer({ children }: { children: React.ReactNode }) {
       const raw = data?.url ?? data?.href;
       if (!raw || typeof raw !== "string") return;
       const url = resolveNotificationRoute(raw);
+      // Already auto-opened by channel:new while backgrounded — don't stack a
+      // second copy of the same chat on top.
+      if (store.getState().channels.activeChannelId === url.replace("/workspace/", "")) {
+        return;
+      }
       if (url.startsWith("/call/")) {
         router.replace(url as any);
       } else {
@@ -325,6 +345,12 @@ function AppInitializer({ children }: { children: React.ReactNode }) {
     };
 
     const notificationSub = addNotificationResponseListener(handleNotificationResponse);
+
+    // FCM rotated the device token: re-register now, not at the next cold start.
+    const tokenSub = Notifications.addPushTokenListener(() => {
+      if (!store.getState().auth.isAuthenticated) return;
+      void refreshPushRegistration(true).catch(() => {});
+    });
 
     // Cold start: the app was launched by tapping a notification. That response
     // was delivered before this effect ran (it waits on auth rehydration), so
@@ -340,6 +366,7 @@ function AppInitializer({ children }: { children: React.ReactNode }) {
       linkSub.remove();
       receivedSub.remove();
       notificationSub.remove();
+      tokenSub.remove();
     };
   }, [handleAppStateChange, initializeApp]);
 

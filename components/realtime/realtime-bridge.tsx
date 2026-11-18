@@ -34,6 +34,7 @@ import { prewarmCalleeRoom, clearCalleePrewarm } from "@/lib/call-prewarm";
 import { isCallActive } from "@/lib/active-call";
 import { surfaceIncomingCall, forgetCallDispatch } from "@/lib/call-dispatch";
 import { getDeviceId } from "@/lib/app-identity";
+import { openAcceptedChannel } from "@/lib/notification-route";
 
 type ChannelUpdatedPayload = {
   channelId: string;
@@ -136,6 +137,8 @@ export function RealtimeBridge() {
       const id = ch.id ?? ch._id;
       if (id) {
         dispatch(upsertChannel({ ...ch, id }));
+        // Only the asker receives this (on accept) — open the chat for them.
+        if (ch.role === "asker") openAcceptedChannel(String(id));
       }
     });
 

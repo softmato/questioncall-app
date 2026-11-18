@@ -1,12 +1,7 @@
 import React, { useState, useRef, useEffect, useCallback } from "react";
-import {
-  View,
-  Text,
-  TouchableOpacity,
-  Image,
-  ActivityIndicator,
-  Linking,
-} from "react-native";
+import { View, Text, TouchableOpacity, ActivityIndicator, Linking } from "react-native";
+import { Image } from "expo-image";
+import Animated, { FadeInDown } from "react-native-reanimated";
 import { Ionicons } from "@expo/vector-icons";
 import { InlineVideo } from "@/components/media/inline-video";
 import { Audio } from "expo-av";
@@ -32,7 +27,93 @@ type Props = {
   onImageOpen: (url: string) => void;
   onRetry: (msg: ChatMessage) => void;
   onToggleMark: (id: string, isMarked: boolean) => void;
+  /** Arrived or was sent while the chat is open — slides in instead of popping. */
+  animateIn?: boolean;
 };
+
+const MEDIA_WIDTH = 240;
+
+/** Chat-sized Cloudinary rendition; the viewer still opens the original. */
+function thumbUrl(url: string) {
+  return url.includes("res.cloudinary.com") && url.includes("/image/upload/")
+    ? url.replace("/image/upload/", "/image/upload/c_limit,w_720,q_auto/")
+    : url;
+}
+
+function mediaHeight(m: ChatMessage) {
+  const w = m.localMedia?.width;
+  const h = m.localMedia?.height;
+  if (!w || !h) return MEDIA_WIDTH;
+  return Math.round(Math.min(320, Math.max(160, (MEDIA_WIDTH * h) / w)));
+}
+
+function ChatImage({
+  msg,
+  frameColor,
+  onOpen,
+}: {
+  msg: ChatMessage;
+  frameColor: string;
+  onOpen: (url: string) => void;
+}) {
+  const [failed, setFailed] = useState(false);
+  const [attempt, setAttempt] = useState(0);
+  const url = msg.mediaUrl!;
+  const isRemote = /^https?:\/\//.test(url);
+  return (
+    <TouchableOpacity
+      activeOpacity={0.85}
+      disabled={msg.isSending}
+      onPress={() => {
+        if (!failed) return onOpen(url);
+        setFailed(false);
+        setAttempt((a) => a + 1);
+      }}
+      style={{
+        width: MEDIA_WIDTH,
+        height: mediaHeight(msg),
+        borderRadius: 16,
+        overflow: "hidden",
+        backgroundColor: frameColor,
+      }}
+    >
+      <Image
+        key={attempt}
+        source={{ uri: isRemote ? thumbUrl(url) : url }}
+        // While the uploaded copy downloads, keep showing the file we just
+        // picked — swapping straight to the remote URL is what left the bubble
+        // blank (black/white) until the chat was reopened.
+        placeholder={msg.localPreviewUri ? { uri: msg.localPreviewUri } : undefined}
+        placeholderContentFit="cover"
+        contentFit="cover"
+        cachePolicy="memory-disk"
+        transition={180}
+        onError={() => setFailed(true)}
+        style={{ width: "100%", height: "100%" }}
+      />
+      {msg.isSending || failed ? (
+        <View
+          style={{
+            position: "absolute",
+            top: 0,
+            left: 0,
+            right: 0,
+            bottom: 0,
+            alignItems: "center",
+            justifyContent: "center",
+            backgroundColor: "rgba(0,0,0,0.28)",
+          }}
+        >
+          {msg.isSending ? (
+            <ActivityIndicator color="#fff" />
+          ) : (
+            <Ionicons name="refresh" size={26} color="#fff" />
+          )}
+        </View>
+      ) : null}
+    </TouchableOpacity>
+  );
+}
 
 // ── Waveform bars (static decorative) ────────────────────────
 const BARS = [4, 8, 14, 10, 18, 12, 20, 14, 10, 16, 8, 18, 12, 6, 14, 10, 18, 8, 12, 16];
@@ -47,11 +128,11 @@ function WaveformBars({
   onAccent: boolean;
   isDark: boolean;
 }) {
-  const activeColor = onAccent ? "#ffffff" : isDark ? "#cbd5e1" : "#374151";
+  const activeColor = onAccent ? "#ffffff" : isDark ? "#d6d3d1" : "#44403c";
   const inactiveColor = onAccent
-    ? "rgba(255,255,255,0.3)"
+    ? "rgba(255,255,255,0.35)"
     : isDark
-      ? "rgba(203,213,225,0.22)"
+      ? "rgba(214,211,209,0.25)"
       : "rgba(0,0,0,0.15)";
   const cutoff = Math.round(progress * BARS.length);
 
@@ -77,13 +158,11 @@ function AudioMessagePlayer({
   mediaUrl,
   onAccent,
   isDark,
-  primaryColor,
 }: {
   mediaUrl: string;
   /** True when this player sits on the solid accent bubble. */
   onAccent: boolean;
   isDark: boolean;
-  primaryColor: string;
 }) {
   const [isPlaying, setIsPlaying] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
@@ -160,10 +239,10 @@ function AudioMessagePlayer({
   const progress = durationSec > 0 ? positionSec / durationSec : 0;
   const timeLabel =
     durationSec > 0 ? formatTime(isPlaying ? positionSec : durationSec) : "0:00";
+  const iconColor = onAccent ? "#fff" : isDark ? "#e7e5e4" : "#44403c";
 
   return (
     <View style={{ flexDirection: "row", alignItems: "center", gap: 10, minWidth: 200 }}>
-      {/* Play/Pause circle */}
       <TouchableOpacity
         onPress={handlePress}
         disabled={isLoading}
@@ -176,25 +255,17 @@ function AudioMessagePlayer({
           backgroundColor: onAccent
             ? "rgba(255,255,255,0.2)"
             : isDark
-              ? "rgba(255,255,255,0.12)"
-              : "rgba(0,0,0,0.08)",
+              ? "rgba(255,255,255,0.1)"
+              : "rgba(0,0,0,0.06)",
         }}
       >
         {isLoading ? (
-          <ActivityIndicator
-            size="small"
-            color={onAccent ? "#fff" : isDark ? "#e2e8f0" : "#374151"}
-          />
+          <ActivityIndicator size="small" color={iconColor} />
         ) : (
-          <Ionicons
-            name={isPlaying ? "pause" : "play"}
-            size={18}
-            color={onAccent ? "#fff" : isDark ? "#e2e8f0" : "#374151"}
-          />
+          <Ionicons name={isPlaying ? "pause" : "play"} size={18} color={iconColor} />
         )}
       </TouchableOpacity>
 
-      {/* Waveform + duration */}
       <View style={{ flex: 1 }}>
         <WaveformBars progress={progress} onAccent={onAccent} isDark={isDark} />
         <Text
@@ -202,9 +273,9 @@ function AudioMessagePlayer({
             fontSize: 11,
             marginTop: 3,
             color: onAccent
-              ? "rgba(255,255,255,0.65)"
+              ? "rgba(255,255,255,0.7)"
               : isDark
-                ? "rgba(226,232,240,0.62)"
+                ? "rgba(231,229,228,0.6)"
                 : "rgba(0,0,0,0.45)",
           }}
         >
@@ -233,20 +304,23 @@ function MessageItemInner({
   onImageOpen,
   onRetry,
   onToggleMark,
+  animateIn = false,
 }: Props) {
+  const pillBg = isDark ? "rgba(255,255,255,0.07)" : "rgba(28,25,23,0.06)";
+
   // ── Date separator ────────────────────────────────────────
   if ("__dateSeparator" in item) {
     return (
-      <View style={{ alignItems: "center", marginVertical: 14 }}>
+      <View style={{ alignItems: "center", marginVertical: 12 }}>
         <View
           style={{
-            backgroundColor: isDark ? "rgba(32,44,39,0.9)" : "rgba(100,116,139,0.15)",
+            backgroundColor: pillBg,
             borderRadius: 20,
-            paddingHorizontal: 14,
+            paddingHorizontal: 12,
             paddingVertical: 4,
           }}
         >
-          <Text style={{ fontSize: 12, fontWeight: "500", color: mutedIconColor }}>
+          <Text style={{ fontSize: 11, fontWeight: "600", color: mutedIconColor }}>
             {item.__dateSeparator}
           </Text>
         </View>
@@ -255,6 +329,7 @@ function MessageItemInner({
   }
 
   const msg = item;
+  const entering = animateIn ? FadeInDown.duration(220) : undefined;
 
   // ── Deleted ───────────────────────────────────────────────
   if (msg.isDeleted) {
@@ -265,14 +340,16 @@ function MessageItemInner({
             flexDirection: "row",
             alignItems: "center",
             gap: 6,
-            backgroundColor: isDark ? "rgba(32,44,39,0.9)" : "rgba(100,116,139,0.1)",
+            backgroundColor: pillBg,
             borderRadius: 20,
             paddingHorizontal: 14,
             paddingVertical: 6,
           }}
         >
-          <Ionicons name="trash-outline" size={14} color={mutedIconColor} />
-          <Text style={{ fontSize: 13, color: mutedIconColor }}>Message deleted</Text>
+          <Ionicons name="trash-outline" size={13} color={mutedIconColor} />
+          <Text style={{ fontSize: 12, color: mutedIconColor, fontStyle: "italic" }}>
+            Message deleted
+          </Text>
         </View>
       </View>
     );
@@ -281,27 +358,30 @@ function MessageItemInner({
   // ── System message ────────────────────────────────────────
   if (msg.isSystemMessage) {
     return (
-      <View style={{ alignItems: "center", marginVertical: 6, paddingHorizontal: 32 }}>
+      <Animated.View
+        entering={entering}
+        style={{ alignItems: "center", marginVertical: 8, paddingHorizontal: 32 }}
+      >
         <View
           style={{
-            backgroundColor: "rgba(14,165,233,0.1)",
+            backgroundColor: pillBg,
             borderRadius: 14,
-            paddingHorizontal: 16,
-            paddingVertical: 10,
+            paddingHorizontal: 14,
+            paddingVertical: 8,
           }}
         >
           <Text
             style={{
-              fontSize: 13,
+              fontSize: 12.5,
               textAlign: "center",
-              color: "#0ea5e9",
-              lineHeight: 20,
+              color: mutedIconColor,
+              lineHeight: 18,
             }}
           >
             {msg.content}
           </Text>
         </View>
-      </View>
+      </Animated.View>
     );
   }
 
@@ -309,113 +389,136 @@ function MessageItemInner({
   const isOwn = msg.isOwn || msg.senderId === userId;
   const showMark = isAcceptor && isActive && isOwn && !isAnswerSubmitted;
 
-  // Bubble colours.
-  //
-  // The incoming side carries the brand green at full strength with white text
-  // (~4.9:1) so the other person's messages are what draws the eye. Own
-  // messages sit back on the same hue dropped to a low-opacity tint — heavier
-  // in dark mode so it still separates from the near-black chat surface — with
-  // near-solid foreground text, so legibility comes from the text rather than
-  // from the tint.
-  const sentBg = isDark ? "rgba(10,138,75,0.22)" : "rgba(10,138,75,0.09)";
-  const receivedBg = primaryColor;
-  const bubbleBg = isOwn ? sentBg : receivedBg;
-  const textColor = isOwn ? (isDark ? "#e9edef" : "#0f172a") : "#ffffff";
-  // The meta line now sits outside the bubble, so it reads against the chat
-  // surface rather than the bubble fill.
-  const metaColor = isDark ? "rgba(233,237,239,0.55)" : "rgba(15,23,42,0.5)";
+  // Own messages carry the brand accent; the other person's sit on a neutral
+  // card. Nothing else in the chat is tinted, so the accent reads as "you".
+  const bubbleBg = isOwn ? primaryColor : isDark ? cardColor : "#FFFFFF";
+  const textColor = isOwn ? "#ffffff" : isDark ? "#F5F5F4" : "#1C1917";
+  const metaColor = isDark ? "rgba(245,245,244,0.5)" : "rgba(28,25,23,0.45)";
+  const frameColor = isDark ? "#3a3532" : "#E7E5E4";
 
-  // Answer-marked overlay
   const isMarked = !!msg.isMarkedAsAnswer;
   // Optimistic sends have used a lowercase "image"; the server sends uppercase.
   const mediaType = msg.mediaType?.toUpperCase() ?? null;
+  const isImage = mediaType === "IMAGE" && !!msg.mediaUrl;
+  const isVideo = mediaType === "VIDEO" && !!msg.mediaUrl;
   // The web sends a document's file name as its text, shown on the file row.
   const isDocument = mediaType === "DOCUMENT" && !!msg.mediaUrl;
+  const isVisual = isImage || isVideo;
+  const hasCaption = !!msg.content && !isDocument;
+
+  const tail = isGroupEnd
+    ? isOwn
+      ? { borderBottomRightRadius: 6 }
+      : { borderBottomLeftRadius: 6 }
+    : {};
 
   return (
-    <View
+    <Animated.View
+      entering={entering}
       style={{
-        // Tight inside a run, open between runs — the grouping does the
-        // visual separating so the bubbles themselves can stay quiet.
+        // Tight inside a run, open between runs.
         marginTop: isGroupStart ? 8 : 2,
         marginBottom: isGroupEnd ? 2 : 0,
-        paddingHorizontal: 14,
+        paddingHorizontal: 12,
         alignItems: isOwn ? "flex-end" : "flex-start",
       }}
     >
       <View
         style={{
-          maxWidth: "78%",
+          maxWidth: "80%",
           borderRadius: 20,
-          // Only the tail of a run gets its outer corner flattened; messages
-          // stacked above it stay fully rounded.
-          ...(isGroupEnd
-            ? isOwn
-              ? { borderBottomRightRadius: 6 }
-              : { borderBottomLeftRadius: 6 }
-            : {}),
-          paddingHorizontal: 14,
-          paddingVertical: 10,
+          ...tail,
+          // Photos/videos fill the bubble with a thin frame, like any chat app.
+          paddingHorizontal: isVisual ? 3 : 14,
+          paddingVertical: isVisual ? 3 : 9,
           backgroundColor: bubbleBg,
-          // Answer highlighted border
+          opacity: msg.isSending && !isVisual ? 0.75 : 1,
+          ...(!isOwn && !isDark ? { borderWidth: 0.5, borderColor } : {}),
           ...(isMarked ? { borderWidth: 2, borderColor: "#f59e0b" } : {}),
         }}
       >
-        {/* Image */}
-        {msg.mediaUrl && mediaType === "IMAGE" ? (
-          <TouchableOpacity
-            onPress={() => onImageOpen(msg.mediaUrl!)}
-            style={{ marginBottom: 6 }}
-          >
-            <Image
-              source={{ uri: msg.mediaUrl }}
-              style={{ width: 220, height: 220, borderRadius: 12 }}
-              resizeMode="cover"
-            />
-          </TouchableOpacity>
+        {isImage ? (
+          <ChatImage msg={msg} frameColor={frameColor} onOpen={onImageOpen} />
         ) : null}
 
-        {/* Video (answers recorded or uploaded on either platform) */}
-        {msg.mediaUrl && mediaType === "VIDEO" ? (
-          <View style={{ marginBottom: msg.content ? 6 : 0 }}>
-            <InlineVideo uri={msg.mediaUrl} width={220} height={160} />
+        {isVideo ? (
+          <View style={{ borderRadius: 16, overflow: "hidden" }}>
+            <InlineVideo uri={msg.mediaUrl!} width={MEDIA_WIDTH} height={170} />
+            {msg.isSending ? (
+              <View
+                pointerEvents="none"
+                style={{
+                  position: "absolute",
+                  top: 0,
+                  left: 0,
+                  right: 0,
+                  bottom: 0,
+                  alignItems: "center",
+                  justifyContent: "center",
+                  backgroundColor: "rgba(0,0,0,0.35)",
+                  gap: 6,
+                }}
+              >
+                <ActivityIndicator color="#fff" />
+                <Text style={{ color: "#fff", fontSize: 12 }}>Uploading…</Text>
+              </View>
+            ) : null}
           </View>
         ) : null}
 
-        {/* Document */}
         {isDocument ? (
           <TouchableOpacity
+            disabled={msg.isSending}
             onPress={() => Linking.openURL(msg.mediaUrl!).catch(() => {})}
-            style={{ flexDirection: "row", alignItems: "center", gap: 8 }}
+            style={{ flexDirection: "row", alignItems: "center", gap: 10, minWidth: 180 }}
           >
-            <Ionicons name="document-text-outline" size={22} color={textColor} />
-            <Text
-              numberOfLines={2}
+            <View
               style={{
-                flexShrink: 1,
-                fontSize: 14,
-                color: textColor,
-                textDecorationLine: "underline",
+                width: 38,
+                height: 38,
+                borderRadius: 10,
+                alignItems: "center",
+                justifyContent: "center",
+                backgroundColor: isOwn ? "rgba(255,255,255,0.18)" : pillBg,
               }}
             >
-              {msg.content || "Open document"}
-            </Text>
+              {msg.isSending ? (
+                <ActivityIndicator size="small" color={textColor} />
+              ) : (
+                <Ionicons name="document-text" size={20} color={textColor} />
+              )}
+            </View>
+            <View style={{ flexShrink: 1 }}>
+              <Text
+                numberOfLines={2}
+                style={{ fontSize: 14, fontWeight: "600", color: textColor }}
+              >
+                {msg.content || "Document"}
+              </Text>
+              <Text
+                style={{ fontSize: 11, color: textColor, opacity: 0.7, marginTop: 1 }}
+              >
+                {msg.isSending ? "Uploading…" : "Tap to open"}
+              </Text>
+            </View>
           </TouchableOpacity>
         ) : null}
 
-        {/* Audio */}
         {mediaType === "AUDIO" && msg.mediaUrl ? (
-          <AudioMessagePlayer
-            mediaUrl={msg.mediaUrl}
-            onAccent={!isOwn}
-            isDark={isDark}
-            primaryColor={primaryColor}
-          />
+          <AudioMessagePlayer mediaUrl={msg.mediaUrl} onAccent={isOwn} isDark={isDark} />
         ) : null}
 
-        {/* Text */}
-        {msg.content && !isDocument ? (
-          <Text style={{ fontSize: 15, lineHeight: 22, color: textColor }}>
+        {hasCaption ? (
+          <Text
+            style={{
+              fontSize: 15,
+              lineHeight: 21,
+              color: textColor,
+              ...(isVisual
+                ? { paddingHorizontal: 9, paddingTop: 6, paddingBottom: 4 }
+                : {}),
+            }}
+          >
             {msg.content}
           </Text>
         ) : null}
@@ -424,16 +527,17 @@ function MessageItemInner({
         {showMark ? (
           <TouchableOpacity
             onPress={() => onToggleMark(msg.id || msg._id || "", isMarked)}
+            hitSlop={6}
             style={{
               position: "absolute",
               top: -10,
-              right: -10,
-              width: 30,
-              height: 30,
-              borderRadius: 15,
-              backgroundColor: isDark ? "#2a3942" : cardColor,
+              left: -12,
+              width: 28,
+              height: 28,
+              borderRadius: 14,
+              backgroundColor: cardColor,
               borderWidth: 1,
-              borderColor: isDark ? "rgba(255,255,255,0.08)" : borderColor,
+              borderColor,
               alignItems: "center",
               justifyContent: "center",
               shadowColor: "#000",
@@ -444,15 +548,14 @@ function MessageItemInner({
           >
             <Ionicons
               name={isMarked ? "star" : "star-outline"}
-              size={16}
+              size={15}
               color="#f59e0b"
             />
           </TouchableOpacity>
         ) : null}
       </View>
 
-      {/* Meta line — outside the bubble, and only under the last message of a
-          run, so a burst of messages doesn't repeat the same timestamp. */}
+      {/* Meta line — outside the bubble, only under the last message of a run. */}
       {msg.sendFailed ? (
         <TouchableOpacity
           onPress={() => onRetry(msg)}
@@ -465,7 +568,7 @@ function MessageItemInner({
           }}
         >
           <Ionicons name="alert-circle" size={13} color="#ef4444" />
-          <Text style={{ fontSize: 11, color: "#ef4444" }}>Tap to retry</Text>
+          <Text style={{ fontSize: 11, color: "#ef4444" }}>Not sent · Tap to retry</Text>
         </TouchableOpacity>
       ) : isGroupEnd ? (
         <View
@@ -478,20 +581,18 @@ function MessageItemInner({
           }}
         >
           <Text style={{ fontSize: 11, color: metaColor }}>
-            {formatMessageTime(msg.sentAt)}
+            {msg.isSending ? "Sending…" : formatMessageTime(msg.sentAt)}
           </Text>
-          {isOwn ? (
-            msg.isSending ? (
-              <Ionicons name="time-outline" size={12} color={metaColor} />
-            ) : msg.isSeen ? (
-              <Ionicons name="checkmark-done" size={13} color={primaryColor} />
+          {isOwn && !msg.isSending ? (
+            msg.isSeen ? (
+              <Ionicons name="checkmark-done" size={14} color={primaryColor} />
             ) : msg.isDelivered ? (
-              <Ionicons name="checkmark" size={13} color={metaColor} />
+              <Ionicons name="checkmark" size={14} color={metaColor} />
             ) : null
           ) : null}
         </View>
       ) : null}
-    </View>
+    </Animated.View>
   );
 }
 

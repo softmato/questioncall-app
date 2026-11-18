@@ -366,6 +366,29 @@ export async function subscribePushToken(token: string): Promise<boolean> {
   return false;
 }
 
+const REFRESH_INTERVAL_MS = 6 * 60 * 60 * 1000;
+let lastRefreshAt = 0;
+
+/**
+ * Silent re-registration for a signed-in, already-permitted device. Push used
+ * to register only on cold start, so a token the server pruned (Expo returns
+ * DeviceNotRegistered after an FCM token rotation) stayed gone for as long as
+ * the app was merely resumed — days without a single push. Never prompts.
+ */
+export async function refreshPushRegistration(force = false): Promise<void> {
+  if (!force && Date.now() - lastRefreshAt < REFRESH_INTERVAL_MS) return;
+  lastRefreshAt = Date.now();
+  if (!Device.isDevice) return;
+  const { status } = await Notifications.getPermissionsAsync();
+  if (status !== "granted") return;
+  const token = await Notifications.getExpoPushTokenAsync({ projectId: EAS_PROJECT_ID })
+    .then((t) => t.data)
+    .catch(() => null);
+  if (!token) return;
+  currentPushToken = token;
+  await subscribePushToken(token);
+}
+
 export async function unsubscribePushToken(token: string): Promise<boolean> {
   try {
     await api.post("/push/unsubscribe", { endpoint: token });
